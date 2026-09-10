@@ -1,0 +1,7 @@
+{
+  "port": 17520,
+  "token": "",
+  "poolDir": "~/.dsh-memory",
+  "retentionDays": 30,
+  "deepseekApiKey": ""
+}

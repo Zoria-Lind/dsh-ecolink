@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    :root { color-scheme: light dark; }
+    body { width: 380px; margin: 0; font: 13px/1.5 system-ui, "Microsoft YaHei", sans-serif; padding: 12px; }
+    h1 { font-size: 15px; margin: 0 0 8px; }
+    section { border-top: 1px solid rgba(128,128,128,.25); padding: 10px 0; }
+    h2 { font-size: 13px; margin: 0 0 6px; color: #0ea5a4; }
+    .row { display: flex; align-items: center; gap: 6px; margin: 4px 0; flex-wrap: wrap; }
+    label { min-width: 110px; }
+    input[type=text], input[type=number] { flex: 1; min-width: 120px; padding: 3px 6px; border-radius: 4px; border: 1px solid rgba(128,128,128,.5); }
+    button { padding: 5px 10px; border-radius: 5px; border: 1px solid rgba(128,128,128,.5); background: transparent; cursor: pointer; }
+    button.primary { background: #0ea5a4; color: #fff; border-color: #0ea5a4; }
+    button.danger { color: #dc2626; }
+    button:disabled { opacity: .5; cursor: default; }
+    .status { padding: 8px; border-radius: 6px; background: rgba(14,165,164,.08); margin-bottom: 4px; }
+    .hint { color: rgba(128,128,128,.9); font-size: 12px; }
+    .sess { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    .sess .id { flex: 1; font-size: 11px; color: rgba(128,128,128,.9); word-break: break-all; }
+    #result { white-space: pre-wrap; font-size: 12px; margin-top: 6px; color: #b45309; }
+  </style>
+</head>
+<body>
+  <h1>dsh-ecolink</h1>
+  <div id="statusLine" class="status">加载中…</div>
+
+  <section>
+    <h2>压缩过时记忆</h2>
+    <div class="row">
+      <button id="compressStart" class="primary">开始压缩(网页端)</button>
+      <button id="compressFinish" disabled>完成压缩</button>
+    </div>
+    <div id="compressStatus" class="hint"></div>
+    <div class="row">
+      <button id="compressApi">备用:API 压缩(一次 Flash 调用)</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>配置</h2>
+    <div class="row"><label>bridgeUrl</label><input type="text" id="cfg_bridgeUrl"></div>
+    <div class="row"><label>token</label><input type="text" id="cfg_token"></div>
+    <div class="row"><label>注入预算(字符)</label><input type="number" id="cfg_maxInjectionChars" min="200" max="20000"></div>
+    <div class="row"><label>过时天数</label><input type="number" id="cfg_compressMinAgeDays" min="0" max="365"></div>
+    <div class="row">
+      <label>注入</label><input type="checkbox" id="cfg_injectEnabled">
+      <label>收割</label><input type="checkbox" id="cfg_harvestEnabled">
+      <label>每会话一次</label><input type="checkbox" id="cfg_singleInjection">
+    </div>
+    <button id="cfgSave" class="primary">保存配置</button>
+    <div id="cfgResult" class="hint"></div>
+  </section>
+
+  <section>
+    <h2>会话管理</h2>
+    <div id="sessionList" class="hint">加载中…</div>
+  </section>
+
+  <section>
+    <h2>DSM 一键导入</h2>
+    <div class="hint">把 DeepSeek Memory 扩展里积累的记忆导入本池(chrome.storage 的 dsm_memories)。</div>
+    <button id="dsmImport">导入 DSM 记忆</button>
+  </section>
+
+  <div id="result"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

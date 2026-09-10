@@ -1,0 +1,12 @@
+# dsh-ecolink-adapter bundle layer:挂载适配层。
+- insert:
+    - id: ecolink-adapter
+      name: 'dsh-ecolink-adapter'
+      config:
+        adapter:
+          enabled: true
+          poolPath: '~/.dsh-memory/memory.json'
+          poolTtlMs: 5000
+          injectEnabled: true
+          singleInjection: true
+          maxInjectionChars: 3000
