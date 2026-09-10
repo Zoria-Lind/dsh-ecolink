@@ -293,8 +293,8 @@ memory_bridge:
 | 3a | 扩展核心通道:fetch/XHR patch + 注入 + SSE 流收割 + 防污染三件套 | ✅ 2026-09-10 现网验证通过(收割/注入/防垃圾/防卡死全绿;架构按 DSM v1.5.0 重写,踩坑见 PROJECT-MEMORY) |
 | 3b | bridge 本地服务:localhost 收 POST + 落盘 + 时间戳分层 + 会话命名 + 归档 | ✅ 2026-09-10 完成(`service/` 下 server.mjs + pool.mjs,5 项单测全绿,未与扩展联调) |
 | 3c | popup 配置面板 + 会话管理 + DSM 一键导入 + 压缩提醒 | ✅ 2026-09-10 完成(popup 四区:压缩一键流程/配置/会话管理/DSM 导入;压缩状态机:开始→旧清单快照→新对话注入压缩指令→收割新 key→结束按"内容未变才删"比对删除;服务端 /memory/stale + /memory/delete;服务/扩展 README 同步) |
-| 4 | DSH 适配层:直读 memory.json + `--session` 过滤 + 两个插件的联动开关 | `--session` CLI 参数能力待查 DSH 插件 API 文档 |
-| 5 | 文档 + 博客 + awesome 更新 | 三篇迭代博客 + 使用指南 |
+| 4 | DSH 适配层:直读 memory.json + `--session` 过滤 + 两个插件的联动开关 | ✅ v0(2026-09-10):`adapter/` 直读池(mtime 缓存只读)+ pre-step 注入(同源选择器+块标记幂等+singleInjection)+ `#记忆名` 过滤,8 项冒烟全过。DSH CLI 实测无 `--session`(只有 `--resume <session>` 且期望会话 id),"按命名会话自动绑定"待 DSH 能力;两插件联动开关待适配层稳定后启用 |
+| 5 | 文档 + 博客 + awesome 更新 | ✅ 仓库 v0 已整备(git 08fba67,含根 README/LICENSE/三组件文档,已存档 E 盘两克隆待推 GitHub);迭代博客待 9-14 新模型后写 |
 
 ## 11. 与现有方案的差异(更新)
 

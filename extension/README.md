@@ -7,6 +7,11 @@ dsh-ecolink 的 Chrome/Edge MV3 扩展:在 chat.deepseek.com 钩住 `/api/v0/cha
 > 架构 v2(2026-09-10):按已上架多版的 DeepSeek Memory(DSM)v1.5.0 稳定性架构重写。
 > v1 曾两次卡死页面——教训:①改浏览器 API 返回契约(IDBRequest→Promise)会让调用方
 > 回调永不触发、整个应用挂起;②重写 completion 响应流风险极高。v2 两条都移除了。
+>
+> **代码来源声明**:核心机制(同步页内配置注入、DOM 收割与剥离、转义还原、示例黑名单、
+> 观察器断开包装、XHR 响应清洗)改编自 [DeepSeek Memory](https://github.com/…)(
+> MIT License,Copyright (c) 2026 Md. Wahid),按其生产级硬化逐项对齐;数据模型与存储
+> 架构(本地文件、bridge 唯一写者、DSH 适配)为本项目自研。
 
 ## 加载(开发)
 

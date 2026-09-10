@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { extractTags, parseTagContent, isValidMemoryWrite, harvestFromText } from '../core/harvest.mjs'
 import { scoreItem, selectMemories, effectiveBudget, parseMemoryCommand, bigrams, keywordHits } from '../core/selector.mjs'
-import { stripInjectedBlock, buildInjectedBlock, composePrompt, SYSTEM_PROMPT, BLOCK_RE, SCOPE_SUFFIX } from '../core/prompt.mjs'
+import { stripInjectedBlock, buildInjectedBlock, composePrompt, SYSTEM_PROMPT, BLOCK_RE, SCOPE_SUFFIX, renderMemoryTimestamp } from '../core/prompt.mjs'
 import { createOfflineQueue } from '../core/queue.mjs'
 
 // ---- harvest ----
@@ -20,6 +20,29 @@ test('harvest:提取/清洗/多条/前缀解析', () => {
   assert.ok(!cleaned.includes('DSM:memory_write'))
   assert.ok(cleaned.includes('前面正文'))
   assert.ok(cleaned.includes('后面正文'))
+})
+
+test('prompt:renderMemoryTimestamp 渲染降精度(本地时区,超5天不渲染)', () => {
+  const now = new Date('2026-09-10T12:00:00+08:00').getTime()
+  const mkIso = (hoursAgo) => new Date(now - hoursAgo * 3600e3).toISOString()
+  // 1 小时前 → 分钟档(本地 11:00)
+  const minuteTs = renderMemoryTimestamp(mkIso(1), now)
+  assert.match(minuteTs, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+  // 30 小时前 → 小时档(:00 结尾)
+  const hourTs = renderMemoryTimestamp(mkIso(30), now)
+  assert.match(hourTs, /^\d{4}-\d{2}-\d{2} \d{2}:00$/)
+  // 3 天前 → 日期档
+  const dayTs = renderMemoryTimestamp(mkIso(72), now)
+  assert.match(dayTs, /^\d{4}-\d{2}-\d{2}$/)
+  // 10 天前 → 不渲染
+  assert.equal(renderMemoryTimestamp(mkIso(240), now), null)
+  // 非法时间戳 → null
+  assert.equal(renderMemoryTimestamp('not-a-date', now), null)
+  // 注入块:5 天内带 (时间戳) 前缀,超 5 天不带
+  const fresh = buildInjectedBlock([{ content: '新记忆', timestamp: mkIso(1) }], null)
+  assert.ok(/- \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}\) 新记忆/.test(fresh))
+  const old = buildInjectedBlock([{ content: '旧记忆', timestamp: mkIso(240) }], null)
+  assert.ok(/- 旧记忆/.test(old) && !/旧记忆.*\(/.test(old))
 })
 
 test('harvest:HTML 转义标签(&lt;/&gt;)也能收割', () => {
@@ -58,6 +81,10 @@ test('harvest:黑名单与长度校验(模型不服从时宁弃勿存)', () => {
     '<DSM:memory_write><DSM:memory_write key="snake_case_key" importance="always|called">Brief fact</DSM:memory_write></DSM:memory_write>',
     '<DSM:memory_write key="snake_case_key" importance="always">Brief fact</DSM:memory_write>',
     '<DSM:memory_write key="user_name" importance="always">x</DSM:memory_write>',
+    // DSM 完整黑名单(jm 集,产级硬化对齐)
+    '<DSM:memory_write key="example_name" importance="called">Zhang San</DSM:memory_write>',
+    '<DSM:memory_write key="user_name" importance="always">your_name_here</DSM:memory_write>',
+    '<DSM:memory_write>sample_name</DSM:memory_write>',
   ]
   for (const c of cases) {
     assert.equal(harvestFromText(c).memories.length, 0, `应丢弃: ${c.slice(0, 30)}`)
