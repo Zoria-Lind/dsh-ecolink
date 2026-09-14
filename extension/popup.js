@@ -1,32 +1,47 @@
-// dsh-ecolink-web popup:状态 / 压缩流程按钮 / 配置 / 会话管理 / DSM 导入。
+// dsh-ecolink-web popup:状态 / 压缩流程按钮 / 配置 / 建议确认 / 会话管理 / DSM 导入。
 // popup 可直接 fetch 127.0.0.1(host_permissions 已含);压缩状态机经 background 消息。
+// E6:type=module → 直接 import 默认配置单一来源(core/config.mjs),消除三份不一致默认值。
+
+import { DEFAULT_CONFIG } from './core/config.mjs'
 
 const $ = (id) => document.getElementById(id)
 
+// E8-fix:token 自动发现(popup 也自己探一次;失败静默,退回手工填)
+async function ensureToken() {
+  const cfg = await loadConfig()
+  if (cfg.token) return cfg.token
+  try {
+    const url = `${cfg.bridgeUrl.replace(/\/$/, '')}/memory/token`
+    const resp = await fetch(url, { headers: { Origin: 'https://chat.deepseek.com' } })
+    if (!resp.ok) return ''
+    const d = await resp.json()
+    const token = typeof d?.token === 'string' ? d.token : ''
+    if (token) await chrome.storage.local.set({ ecolink_config: { ...cfg, token } })
+    return token
+  } catch { return '' }
+}
+
 async function bridgeFetch(path, init = {}) {
   const cfg = await loadConfig()
+  // 首次进入:若无 token 先尝试自动发现(服务端 E8 起强制 token)
+  const token = cfg.token || (await ensureToken())
   const headers = { 'Content-Type': 'application/json', ...(init.headers ?? {}) }
-  if (cfg.token) headers['X-Ecolink-Token'] = cfg.token
+  if (token) headers['X-Ecolink-Token'] = token
   return fetch(`${cfg.bridgeUrl.replace(/\/$/, '')}${path}`, { ...init, headers })
 }
 
 async function loadConfig() {
   const got = await chrome.storage.local.get('ecolink_config')
-  return {
-    bridgeUrl: 'http://127.0.0.1:17520',
-    token: '',
-    injectEnabled: true,
-    harvestEnabled: true,
-    singleInjection: true,
-    maxInjectionChars: 3000,
-    compressMinAgeDays: 5,
-    ...(got.ecolink_config ?? {}),
-  }
+  return { ...DEFAULT_CONFIG, ...(got.ecolink_config ?? {}) }
 }
 
 async function refreshStatus() {
   try {
     const resp = await bridgeFetch('/memory/status')
+    if (resp.status === 401) {
+      $('statusLine').textContent = '服务在线但鉴权失败(401):token 不匹配。重新打开本面板会自动重取 token;仍失败就检查 service/config.json 的 token 与扩展是否一致'
+      return
+    }
     if (!resp.ok) throw new Error('HTTP ' + resp.status)
     const st = await resp.json()
     const sessionCount = Object.keys(st.sessions ?? {}).length
@@ -78,6 +93,51 @@ async function refreshSessions() {
   }
 }
 
+// ---- 待确认建议(E5:写入先入建议队列,确认后才入池;未确认条目不会出现在 DSH 上下文) ----
+async function refreshSuggestions() {
+  const list = $('suggestionList')
+  try {
+    const resp = await bridgeFetch('/memory/suggestions')
+    if (!resp.ok) throw new Error('HTTP ' + resp.status)
+    const r = await resp.json()
+    const items = r.suggestions ?? []
+    if (items.length === 0) { list.textContent = '暂无待确认建议'; return }
+    list.textContent = ''
+    for (const s of items) {
+      const row = document.createElement('div')
+      row.className = 'sess'
+      const main = document.createElement('span')
+      main.className = 'id'
+      main.textContent = `${s.content}(${s.session_id ? '会话池' : '共享池'} · ${s.source ?? 'web'})`
+      const ok = document.createElement('button')
+      ok.className = 'primary'
+      ok.textContent = '确认'
+      ok.onclick = async () => {
+        ok.disabled = true
+        try {
+          await bridgeFetch('/memory/suggest/confirm', { method: 'POST', body: JSON.stringify({ id: s.id }) })
+          refreshSuggestions()
+          refreshStatus()
+        } finally { ok.disabled = false }
+      }
+      const no = document.createElement('button')
+      no.className = 'danger'
+      no.textContent = '拒绝'
+      no.onclick = async () => {
+        no.disabled = true
+        try {
+          await bridgeFetch('/memory/suggest/reject', { method: 'POST', body: JSON.stringify({ id: s.id }) })
+          refreshSuggestions()
+        } finally { no.disabled = false }
+      }
+      row.append(main, ok, no)
+      list.appendChild(row)
+    }
+  } catch {
+    list.textContent = '服务不可达'
+  }
+}
+
 async function fillConfigForm() {
   const cfg = await loadConfig()
   $('cfg_bridgeUrl').value = cfg.bridgeUrl
@@ -85,12 +145,16 @@ async function fillConfigForm() {
   $('cfg_maxInjectionChars').value = cfg.maxInjectionChars
   $('cfg_compressMinAgeDays').value = cfg.compressMinAgeDays ?? 5
   $('cfg_injectEnabled').checked = cfg.injectEnabled
+  $('cfg_contentInjectionEnabled').checked = cfg.contentInjectionEnabled !== false
   $('cfg_harvestEnabled').checked = cfg.harvestEnabled
   $('cfg_singleInjection').checked = cfg.singleInjection
+  $('cfg_panelEnabled').checked = cfg.panelEnabled
+  $('cfg_muted').checked = cfg.muted
 }
 
 $('cfgSave').onclick = async () => {
-  const daysVal = Number($('cfg_compressMinAgeDays').value)
+  const daysRaw = String($('cfg_compressMinAgeDays').value ?? '').trim()
+  const daysVal = daysRaw === '' ? 5 : Number(daysRaw) // 空字段回落默认 5(Number('')===0 会让全池变"过时"→ 压缩=清池)
   const maxVal = Number($('cfg_maxInjectionChars').value)
   const next = {
     bridgeUrl: $('cfg_bridgeUrl').value.trim() || 'http://127.0.0.1:17520',
@@ -99,8 +163,11 @@ $('cfgSave').onclick = async () => {
     // 注意:0 是合法值(测试用),不能用 || 兜底(0 被当假值吞掉)
     compressMinAgeDays: Number.isFinite(daysVal) ? Math.max(0, daysVal) : 5,
     injectEnabled: $('cfg_injectEnabled').checked,
+    contentInjectionEnabled: $('cfg_contentInjectionEnabled').checked,
     harvestEnabled: $('cfg_harvestEnabled').checked,
     singleInjection: $('cfg_singleInjection').checked,
+    panelEnabled: $('cfg_panelEnabled').checked,
+    muted: $('cfg_muted').checked,
   }
   await chrome.storage.local.set({ ecolink_config: next })
   $('cfgResult').textContent = '已保存 ✓'
@@ -185,5 +252,8 @@ $('compressApi').onclick = async () => {
 
 refreshStatus()
 refreshSessions()
+refreshSuggestions()
 fillConfigForm()
 refreshCompress()
+// E6:打开 popup 即视为"已读",badge 的变更角标清零
+try { chrome.runtime?.sendMessage?.({ kind: 'mark-read' })?.catch?.(() => {}) } catch { /* ignore */ }

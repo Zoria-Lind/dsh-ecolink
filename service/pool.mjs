@@ -6,10 +6,10 @@
 //   - 过期归档:超过保留期且未被访问过的非 pinned 条目 → archive.json(不硬删,可恢复)
 //   - 原子写入:tmp + rename,串行化所有变更操作(扩展与 popup 可能并发请求)
 
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 
 // ---- 时间戳精度(渲染降精度规则,PLAN.md §4.2) ----
 // 2 小时内→分钟;48 小时内→小时;5 天内→日期;更早→不渲染时间戳(内容里用户自写时间点自然保留)
@@ -41,6 +41,42 @@ export function renderTimestamp(isoTs, precision = null) {
 
 const EMPTY_POOL = { version: 1, shared_pool: [], session_pools: {} }
 
+// ---- 快照与 diff(E3:变更角标/同步的基础;此前服务侧完全没有 hash/快照能力) ----
+// 规范化 JSON 的 sha256;state 是池全量(shared_pool + session_pools)
+export function hashState(state) {
+  return createHash('sha256').update(JSON.stringify(state)).digest('hex')
+}
+
+// 按 id/key 对比两份池状态,added/updated/removed 同时覆盖 shared_pool 与 session_pools。
+// keyOf:key 优先(压缩/覆盖闭环的锚点),无 key 回退 id。updated 用 JSON 全等比较——
+// 注意 touch 会改 last_accessed → 任何 touch 都算 updated(08 §B16,文档已写明)。
+export function diffStates(prev, next) {
+  const keyOf = (m) => `${m?.key ?? ''}::${m?.id ?? ''}`
+  const buckets = (s) => ({ shared: s?.shared_pool ?? [], sessions: s?.session_pools ?? {} })
+  const A = buckets(prev)
+  const B = buckets(next)
+  const added = []
+  const removed = []
+  const updated = []
+  const a = new Map(A.shared.map((m) => [keyOf(m), m]))
+  const b = new Map(B.shared.map((m) => [keyOf(m), m]))
+  for (const [k, v] of b) {
+    if (!a.has(k)) added.push(k)
+    else if (JSON.stringify(a.get(k)) !== JSON.stringify(v)) updated.push(k)
+  }
+  for (const k of a.keys()) if (!b.has(k)) removed.push(k)
+  for (const sid of new Set([...Object.keys(A.sessions), ...Object.keys(B.sessions)])) {
+    const sa = new Map((A.sessions[sid]?.memories ?? []).map((m) => [keyOf(m), m]))
+    const sb = new Map((B.sessions[sid]?.memories ?? []).map((m) => [keyOf(m), m]))
+    for (const [k, v] of sb) {
+      if (!sa.has(k)) added.push(`${sid}:${k}`)
+      else if (JSON.stringify(sa.get(k)) !== JSON.stringify(v)) updated.push(`${sid}:${k}`)
+    }
+    for (const k of sa.keys()) if (!sb.has(k)) removed.push(`${sid}:${k}`)
+  }
+  return { added, removed, updated }
+}
+
 function expandHome(dir) {
   if (typeof dir !== 'string' || dir.length === 0) return dir
   if (dir === '~' || dir.startsWith('~/') || dir.startsWith('~\\')) return join(homedir(), dir.slice(2))
@@ -50,9 +86,21 @@ function expandHome(dir) {
 export function createPool(options = {}) {
   const dir = expandHome(options.dir ?? join(homedir(), '.dsh-memory'))
   const retentionDays = options.retentionDays ?? 30
+  // E7 敏感词黑名单(落盘前拦截;命中 → 拒收该条并计入 blocked;大小写不敏感的子串匹配)
+  const blacklist = (Array.isArray(options.blacklist) ? options.blacklist : [])
+    .map((s) => String(s ?? '').trim().toLowerCase())
+    .filter(Boolean)
+  const isBlocked = (content) => {
+    if (blacklist.length === 0) return false
+    const c = String(content ?? '').toLowerCase()
+    return blacklist.some((w) => c.includes(w))
+  }
   const poolFile = join(dir, 'memory.json')
   const archiveFile = join(dir, 'archive.json')
+  const snapDir = join(dir, 'snapshots') // E3 快照目录:<hash>.json + latest.json
+  const sugFile = join(dir, 'suggestions.json') // E5 建议确认队列(独立文件,不进 memory.json → 适配层读不到未确认条目)
   let state = null
+  let sugState = null
   let queue = Promise.resolve() // 变更串行化
 
   function load() {
@@ -78,11 +126,39 @@ export function createPool(options = {}) {
     state = structuredClone(EMPTY_POOL)
   }
 
+  // 原子写(E8 加固):tmp + rename;中途失败也要清掉 tmp 残留(P8:残留 tmp 曾伴生整体丢写入)
+  function atomicWrite(file, text) {
+    mkdirSync(dirname(file), { recursive: true })
+    const tmp = `${file}.tmp-${process.pid}-${Date.now()}`
+    try {
+      writeFileSync(tmp, text, 'utf8')
+      renameSync(tmp, file)
+    } finally {
+      try { if (existsSync(tmp)) unlinkSync(tmp) } catch { /* 清理失败不掩盖原错误 */ }
+    }
+  }
+
   function save() {
-    mkdirSync(dirname(poolFile), { recursive: true })
-    const tmp = `${poolFile}.tmp-${process.pid}-${Date.now()}`
-    writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8')
-    renameSync(tmp, poolFile)
+    atomicWrite(poolFile, JSON.stringify(state, null, 2))
+  }
+
+  // ---- E5 建议确认队列(独立存储;确认后才由 applySync 写入 memory.json) ----
+  function sugLoad() {
+    if (sugState) return
+    if (existsSync(sugFile)) {
+      try {
+        const data = JSON.parse(readFileSync(sugFile, 'utf8'))
+        sugState = { version: data?.version ?? 1, suggestions: Array.isArray(data?.suggestions) ? data.suggestions : [] }
+        return
+      } catch (err) {
+        try { renameSync(sugFile, `${sugFile}.broken-${Date.now()}`) } catch { /* 忽略 */ }
+        console.warn(`[ecolink-service] suggestions.json 损坏(${err?.message}),已备份并从空队列开始`)
+      }
+    }
+    sugState = { version: 1, suggestions: [] }
+  }
+  function sugSave() {
+    atomicWrite(sugFile, JSON.stringify(sugState, null, 2))
   }
 
   // 串行执行变更(所有写操作经此排队,防并发交错)
@@ -119,10 +195,7 @@ export function createPool(options = {}) {
         try { archive = JSON.parse(readFileSync(archiveFile, 'utf8')) ?? archive } catch { /* 损坏则新建 */ }
       }
       archive.archived = [...(archive.archived ?? []), ...archived]
-      mkdirSync(dirname(archiveFile), { recursive: true })
-      const tmp = `${archiveFile}.tmp-${process.pid}-${Date.now()}`
-      writeFileSync(tmp, JSON.stringify(archive, null, 2), 'utf8')
-      renameSync(tmp, archiveFile)
+      atomicWrite(archiveFile, JSON.stringify(archive, null, 2))
     }
     return archived.length
   }
@@ -150,75 +223,150 @@ export function createPool(options = {}) {
     return null
   }
 
+  // 条目入库的核心循环(sync 与建议确认共用):key 化 upsert + 无 key 内容去重 + replace
+  function addMemoriesToState(payload) {
+    const memories = Array.isArray(payload?.memories) ? payload.memories : []
+    const sessionId = typeof payload?.session_id === 'string' && payload.session_id.length > 0 ? payload.session_id : null
+    let added = 0
+    let replaced = 0
+    let blocked = 0
+    for (const m of memories) {
+      if (typeof m?.content !== 'string' || m.content.trim().length === 0) continue
+      // E7 黑名单:落盘前拦截(覆盖 sync / 建议确认 / compress 经 sync 的写入)
+      if (isBlocked(m.content)) { blocked += 1; continue }
+      if (m.action === 'replace' && typeof m.id === 'string') {
+        const target = findItem(m.id)
+        if (target) {
+          target.content = m.content.trim()
+          target.timestamp = new Date().toISOString()
+          target.source = m.source ?? target.source
+          replaced += 1
+          continue
+        }
+      }
+      // key 化 upsert(DSM 同款语义):同 key 覆盖旧值——压缩/更新闭环的锚点
+      // (模型重写旧记忆时吐同 key 新值,收割落盘自动覆盖,无需扩展侧传 uuid)
+      const key = typeof m.key === 'string' && m.key.trim().length > 0 ? m.key.trim() : null
+      if (key) {
+        const poolArr = sessionId ? (state.session_pools[sessionId]?.memories ?? []) : state.shared_pool
+        const existing = poolArr.find((it) => it.key === key)
+        if (existing) {
+          // DSM 同款:同 key 同值跳过写入(防时间戳无意义翻新与重复计数)
+          if (existing.content === m.content.trim()) continue
+          existing.content = m.content.trim()
+          existing.timestamp = new Date().toISOString()
+          existing.importance = m.importance ?? existing.importance
+          existing.source = m.source ?? existing.source
+          replaced += 1
+          if (sessionId && state.session_pools[sessionId]) state.session_pools[sessionId].last_active = new Date().toISOString()
+          continue
+        }
+      }
+      // 无 key 条目按内容去重:相同内容已存在则跳过
+      // (模型回显示例会同一内容反复吐,池层是最后一道闸)
+      if (!key) {
+        const poolArr = sessionId ? (state.session_pools[sessionId]?.memories ?? []) : state.shared_pool
+        if (poolArr.some((it) => it.content === m.content.trim())) continue
+      }
+      const item = makeItem({ content: m.content, importance: m.importance, source: m.source, pinned: m.pinned, key })
+      if (sessionId) {
+        if (!state.session_pools[sessionId]) {
+          state.session_pools[sessionId] = {
+            identity: null,
+            first_seen: new Date().toISOString(),
+            last_active: new Date().toISOString(),
+            memories: [],
+          }
+        } else {
+          state.session_pools[sessionId].last_active = new Date().toISOString()
+        }
+        state.session_pools[sessionId].memories.push(item)
+      } else {
+        state.shared_pool.push(item)
+      }
+      added += 1
+    }
+    return { added, replaced, blocked }
+  }
+
   return {
     poolFile,
     archiveFile,
     dir,
 
-    // POST /memory/sync:session_id 缺省/null → 共享池;replace 需带 id(目标池优先,再找共享池)
+    // POST /memory/sync:session_id 缺省/null → 共享池
     sync(payload) {
       return mutate(() => {
         load()
+        const r = addMemoriesToState(payload)
+        const archived = runArchive()
+        return { ok: true, added: r.added, replaced: r.replaced, archived, blocked: r.blocked }
+      })
+    },
+
+    // ---- E5 建议确认队列 ----
+    // POST /memory/suggest(/memory/sync 在 autoConfirm=false 时也走这里):
+    // 只进建议队列,绝不直接落 memory.json → DSH 适配层读不到未确认条目
+    suggest(payload) {
+      return mutate(() => {
+        load()
+        sugLoad()
         const memories = Array.isArray(payload?.memories) ? payload.memories : []
         const sessionId = typeof payload?.session_id === 'string' && payload.session_id.length > 0 ? payload.session_id : null
-        let added = 0
-        let replaced = 0
+        let queued = 0
+        let blocked = 0
         for (const m of memories) {
           if (typeof m?.content !== 'string' || m.content.trim().length === 0) continue
-          if (m.action === 'replace' && typeof m.id === 'string') {
-            const target = findItem(m.id)
-            if (target) {
-              target.content = m.content.trim()
-              target.timestamp = new Date().toISOString()
-              target.source = m.source ?? target.source
-              replaced += 1
-              continue
-            }
-          }
-          // key 化 upsert(DSM 同款语义):同 key 覆盖旧值——压缩/更新闭环的锚点
-          // (模型重写旧记忆时吐同 key 新值,收割落盘自动覆盖,无需扩展侧传 uuid)
-          const key = typeof m.key === 'string' && m.key.trim().length > 0 ? m.key.trim() : null
-          if (key) {
-            const poolArr = sessionId ? (state.session_pools[sessionId]?.memories ?? []) : state.shared_pool
-            const existing = poolArr.find((it) => it.key === key)
-            if (existing) {
-              // DSM 同款:同 key 同值跳过写入(防时间戳无意义翻新与重复计数)
-              if (existing.content === m.content.trim()) continue
-              existing.content = m.content.trim()
-              existing.timestamp = new Date().toISOString()
-              existing.importance = m.importance ?? existing.importance
-              existing.source = m.source ?? existing.source
-              replaced += 1
-              if (sessionId && state.session_pools[sessionId]) state.session_pools[sessionId].last_active = new Date().toISOString()
-              continue
-            }
-          }
-          // 无 key 条目按内容去重:相同内容已存在则跳过
-          // (模型回显示例会同一内容反复吐,池层是最后一道闸)
-          if (!key) {
-            const poolArr = sessionId ? (state.session_pools[sessionId]?.memories ?? []) : state.shared_pool
-            if (poolArr.some((it) => it.content === m.content.trim())) continue
-          }
-          const item = makeItem({ content: m.content, importance: m.importance, source: m.source, pinned: m.pinned, key })
-          if (sessionId) {
-            if (!state.session_pools[sessionId]) {
-              state.session_pools[sessionId] = {
-                identity: null,
-                first_seen: new Date().toISOString(),
-                last_active: new Date().toISOString(),
-                memories: [],
-              }
-            } else {
-              state.session_pools[sessionId].last_active = new Date().toISOString()
-            }
-            state.session_pools[sessionId].memories.push(item)
-          } else {
-            state.shared_pool.push(item)
-          }
-          added += 1
+          if (isBlocked(m.content)) { blocked += 1; continue } // E7:黑名单命中不入队
+          sugState.suggestions.push({
+            id: randomUUID(),
+            key: typeof m.key === 'string' && m.key.trim().length > 0 ? m.key.trim() : null,
+            content: m.content.trim(),
+            importance: m.importance ?? 'called',
+            source: m.source ?? 'web',
+            timestamp: new Date().toISOString(),
+            session_id: sessionId,
+            pinned: !!m.pinned,
+          })
+          queued += 1
         }
+        if (queued > 0) sugSave()
+        return { ok: true, queued, blocked }
+      })
+    },
+    // GET /memory/suggestions
+    listSuggestions() {
+      load()
+      sugLoad()
+      return { ok: true, suggestions: sugState.suggestions }
+    },
+    // POST /memory/suggest/confirm:从队列移除并按 sync 语义入库(返回真实 added/replaced)
+    confirmSuggestion({ id } = {}) {
+      return mutate(() => {
+        load()
+        sugLoad()
+        const idx = sugState.suggestions.findIndex((s) => s.id === id)
+        if (idx < 0) return { ok: true, confirmed: 0, added: 0, replaced: 0, archived: 0 }
+        const sug = sugState.suggestions.splice(idx, 1)[0]
+        sugSave()
+        const r = addMemoriesToState({
+          session_id: sug.session_id,
+          memories: [{ content: sug.content, key: sug.key, importance: sug.importance, source: sug.source, pinned: sug.pinned }],
+        })
         const archived = runArchive()
-        return { ok: true, added, replaced, archived }
+        return { ok: true, confirmed: 1, added: r.added, replaced: r.replaced, archived, blocked: r.blocked }
+      })
+    },
+    // POST /memory/suggest/reject:直接丢弃
+    rejectSuggestion({ id } = {}) {
+      return mutate(() => {
+        load()
+        sugLoad()
+        const idx = sugState.suggestions.findIndex((s) => s.id === id)
+        if (idx < 0) return { ok: true, rejected: 0 }
+        sugState.suggestions.splice(idx, 1)
+        sugSave()
+        return { ok: true, rejected: 1 }
       })
     },
 
@@ -289,10 +437,12 @@ export function createPool(options = {}) {
         load()
         let added = 0
         let skipped = 0
+        let blocked = 0
         const existing = new Set(state.shared_pool.map((it) => it.content))
         for (const e of entries ?? []) {
           const content = [e?.key, e?.value].filter((s) => typeof s === 'string' && s.trim().length > 0).join(': ')
           if (!content) continue
+          if (isBlocked(content)) { blocked += 1; continue } // E7:黑名单同样覆盖 DSM 导入
           if (existing.has(content)) { skipped += 1; continue }
           const item = makeItem({ content, importance: e?.importance || 'key', source: 'dsm-import' })
           state.shared_pool.push(item)
@@ -300,7 +450,7 @@ export function createPool(options = {}) {
           added += 1
         }
         runArchive()
-        return { ok: true, added, skipped }
+        return { ok: true, added, skipped, blocked }
       })
     },
 
@@ -349,6 +499,57 @@ export function createPool(options = {}) {
         poolFile,
         retentionDays,
       }
+    },
+
+    // ---- E3:快照 / diff / 快照清单 ----
+    // 生成快照:规范化 JSON 的 sha256 落 snapshots/<hash>.json,latest.json 指向当前 hash。
+    // 走 mutate() 保持单一写者语义(mutate 末尾的 save() 对未变更的池是幂等重写,无害)。
+    snapshotNow() {
+      return mutate(() => {
+        const hash = hashState(state)
+        mkdirSync(snapDir, { recursive: true })
+        atomicWrite(join(snapDir, `${hash}.json`), JSON.stringify(state))
+        atomicWrite(join(snapDir, 'latest.json'), JSON.stringify({ hash }))
+        return hash
+      })
+    },
+    // 与指定快照对比;since='latest' 时解析 latest.json。返回 null = 快照不存在。
+    diffSince(since) {
+      load()
+      let hash = since
+      if (since === 'latest') {
+        const latestFile = join(snapDir, 'latest.json')
+        if (!existsSync(latestFile)) return null
+        try { hash = JSON.parse(readFileSync(latestFile, 'utf8'))?.hash } catch { return null }
+        if (typeof hash !== 'string') return null
+      }
+      if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) return null
+      const file = join(snapDir, `${hash}.json`)
+      if (!existsSync(file)) return null
+      let prev
+      try { prev = JSON.parse(readFileSync(file, 'utf8')) } catch { return null }
+      return { ok: true, since: hash, current: hashState(state), ...diffStates(prev, state) }
+    },
+    // 快照清单(按 mtime 倒序)+ latest 指向
+    listSnapshots() {
+      load()
+      let latest = null
+      const latestFile = join(snapDir, 'latest.json')
+      if (existsSync(latestFile)) {
+        try { latest = JSON.parse(readFileSync(latestFile, 'utf8'))?.hash ?? null } catch { latest = null }
+      }
+      const snapshots = []
+      if (existsSync(snapDir)) {
+        for (const name of readdirSync(snapDir)) {
+          const m = /^([0-9a-f]{64})\.json$/.exec(name)
+          if (!m) continue
+          let mtimeMs = 0
+          try { mtimeMs = statSync(join(snapDir, name)).mtimeMs } catch { /* 忽略 */ }
+          snapshots.push({ hash: m[1], mtimeMs })
+        }
+      }
+      snapshots.sort((a, b) => b.mtimeMs - a.mtimeMs)
+      return { ok: true, latest, snapshots }
     },
   }
 }

@@ -35,12 +35,19 @@
   pushFresh()
   setInterval(pushFresh, 45000)
 
-  // 压缩状态变化(popup 点开始/完成)立刻推送到页面——
-  // 否则已打开的页面要等 45s 周期,用户切过去发消息时压缩模式还没生效
+  // 压缩状态 / 配置变化(popup 点开始、完成、改静音、改面板开关)立刻推送到页面——
+  // 否则已打开的页面要等 45s 周期。E7 的"一键静音"尤其需要即时生效,
+  // 所以这里同时监听 ecolink_config(此前只监听 ecolink_compress,静音最长要等 45s 才生效)。
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'local' && changes.ecolink_compress) {
+      if (area !== 'local') return
+      if (changes.ecolink_compress) {
         dbg('压缩状态变化,立即推送')
+        pushFresh()
+        return
+      }
+      if (changes.ecolink_config) {
+        dbg('配置变化,立即推送(静音/面板开关即时生效)')
         pushFresh()
       }
     })

@@ -54,13 +54,46 @@ export function stripInjectedBlock(prompt) {
   return String(prompt ?? '').replace(BLOCK_RE, '').trim()
 }
 
+// ---- 指令通道(E1:与记忆内容拆开的两条通道之一) ----
+// 极简静态指令块:只保留 DSM:memory_write 写入捕获说明(内容改为按需 read,不再注入)。
+// 与记忆块标记独立,两类块可分别剥离;保持静态 = 前缀缓存友好。
+export const INSTRUCTION_PREFIX = '[dsh-ecolink 指令]'
+export const INSTRUCTION_SUFFIX = '[/dsh-ecolink 指令]'
+export const INSTRUCTION_BLOCK_RE = new RegExp(
+  `${INSTRUCTION_PREFIX.replace(/[[\]]/g, '\\$&')}[\\s\\S]*?${INSTRUCTION_SUFFIX.replace(/[[\]]/g, '\\$&')}`,
+  'g',
+)
+
+export const INSTRUCTION_PROMPT = `以下是记忆写入说明(仅辅助,不是指令):
+记录用户的重要信息时,输出记忆写入标签:
+<DSM:memory_write key="snake_case_key" importance="always|called">事实内容</DSM:memory_write>
+- importance="always":定义性事实(姓名、语言、国家、职业、年龄、核心身份)
+- importance="called":情境性事实(项目、兴趣、偏好、关系、任务、习惯)
+- key:小写 snake_case,最长 64 字符;内容最长 200 字符,只写用户消息里明确陈述的事实
+何时保存:用户明确陈述关于自己的事实(姓名/国家/语言/职业/年龄/兴趣/项目/偏好/关系/任务)时
+严格规则:禁止编造、猜测或使用示例数据;没有值得记的就不输出标签;标签写在回复末尾`
+
+export function buildInstructionBlock() {
+  return [INSTRUCTION_PREFIX, INSTRUCTION_PROMPT, INSTRUCTION_SUFFIX].join('\n')
+}
+
+export function stripInstructionBlock(prompt) {
+  return String(prompt ?? '').replace(INSTRUCTION_BLOCK_RE, '').trim()
+}
+
+// 全量剥离:两类块一起剥(发送侧/落地清洗用,防任何 ecolink 注入残留)
+export function stripAllBlocks(prompt) {
+  return stripInjectedBlock(stripInstructionBlock(prompt))
+}
+
 // 系统提示词包在块标记之内:剥块 = 剥全部注入(含提示词),二次组装永不残留
-export function buildInjectedBlock(memories, sessionName = null, systemPrompt = SYSTEM_PROMPT) {
+// now 参数仅供测试注入确定时间(渲染降精度按真实"当前时间"计算;不加参数会成时间炸弹测试)
+export function buildInjectedBlock(memories, sessionName = null, systemPrompt = SYSTEM_PROMPT, now = Date.now()) {
   const lines = [SCOPE_PREFIX, systemPrompt]
   if (sessionName) lines.push(`[会话:${sessionName}]`)
   for (const m of memories ?? []) {
     // 渲染降精度:按龄显示分钟/小时/日期,超过 5 天不渲染时间戳(内容里自写时间点自然保留)
-    const ts = m?.timestamp ? renderMemoryTimestamp(m.timestamp) : null
+    const ts = m?.timestamp ? renderMemoryTimestamp(m.timestamp, now) : null
     lines.push(ts ? `- (${ts}) ${m?.content ?? ''}` : `- ${m?.content ?? ''}`)
   }
   lines.push(SCOPE_SUFFIX)

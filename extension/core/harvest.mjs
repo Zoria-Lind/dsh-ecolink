@@ -26,7 +26,7 @@ const STANDALONE_RE = /^(待补充|待填写|待确认|TODO|TBD|\.\.\.|暂无|�
 // DSM(MIT,Md. Wahid)完整黑名单 + 本项目的增量条目(指令回显等)
 const SUBSTRING_BLACKLIST = [
   ...['example_name', 'extracted_name', 'extracted_country', 'extracted_language', 'placeholder', 'example', '[fact from user', '[extracted_', '[user_name]', '[user_country]', '[user_language]', 'your_name_here', 'your_country_here', 'sample_name'],
-  ...['brief fact', 'snake_case_key', 'fact from user', '记忆内容', '输出记忆标签', 'key: fact', '开头,紧接着写事实,以', '开头,紧接着写该条内容,以', '三部分连在一起', '事实内容', 'snake_case_key'],
+  ...['brief fact', 'snake_case_key', 'fact from user', '记忆内容', '输出记忆标签', 'key: fact', '开头,紧接着写事实,以', '开头,紧接着写该条内容,以', '三部分连在一起', '事实内容'],
 ]
 const KEY_BLACKLIST = new Set(['snake_case_key', 'example', 'example_name', 'example_key', 'placeholder', 'sample', 'key'])
 

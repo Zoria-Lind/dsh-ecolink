@@ -88,9 +88,12 @@ MV3 扩展(document_start content script)
 扩展 ──POST http://127.0.0.1:<port>/memory/sync──▶ bridge 本地服务 ──落盘──▶ ~/.dsh-memory/memory.json
 ```
 
-- bridge 服务是 `memory.json` 的**唯一写者**(DSH 适配层只读),从根上避免并发写冲突
+- bridge 服务是 `memory.json` 的**唯一写者**(直接写盘者只有 service),从根上避免并发写冲突。
+  **v0.1.1 更新(E4)**:DSH 侧获得显式写回通道 `/ecolink-push`——但 DSH 仍**不直接写盘**,
+  只向 service 发 HTTP 请求(经 `/memory/sync`,E5 起默认进建议确认队列),落盘仍由 service 独占;
+  DSH 适配层对池文件保持只读
 - bridge 未启动时,扩展把记忆缓存在 chrome.storage.local 的离线队列,重连后补发
-- 服务绑定 127.0.0.1 + 可选共享 token,防任意本地网页调用
+- 服务绑定 127.0.0.1 + 共享 token(E8:为空时启动自动生成并写回 config.json;空 token 一律 401),防任意本地网页调用
 
 ### 3.4 防污染三件套(新增,v1 完全没有)
 
@@ -218,21 +221,35 @@ deepseek-memory 的记忆存在 `chrome.storage.local` 的 `dsm_memories` 键下
 ~/.dsh-memory/memory.json (+ archive.json)
           ▲
 ┌─────────┴───────────┐
-│ DSH 适配层           │  只读,按 --session 过滤注入
-│ dsh-memory-bridge-   │  与 token-optimizer /
-│ adapter              │  behavior-enhancer 联动开关
+│ DSH 适配层           │  读池+指令注入;显式写回走
+│ dsh-memory-bridge-   │  /ecolink-push(HTTP,service 落盘)
+│ adapter              │  与 token-optimizer /
+│                      │  behavior-enhancer 联动开关
 └─────────────────────┘
 ```
 
 ## 7. HTTP 接口(bridge 服务,127.0.0.1 + 可选 token)
 
 ```bash
-POST /memory/sync            # 扩展推送新记忆/覆盖指令
+POST /memory/sync            # 扩展推送新记忆/覆盖指令(E5 起默认进建议确认队列,autoConfirm=true 保留直入)
+POST /memory/suggest         # 显式提交建议(队列)
+POST /memory/suggest/confirm # 确认建议 → 入池
+POST /memory/suggest/reject  # 拒绝建议 → 丢弃
+POST /memory/touch           # 记录访问时间(选择器打分 + 归档豁免)
+POST /memory/delete          # 按 id/key 删除(压缩闭环)
 POST /memory/session         # 会话命名映射更新
+POST /memory/import-dsm      # DSM 记忆一键导入(内容去重)
+POST /memory/diag            # 诊断事件落 service.log
+POST /memory/compress        # 备用 API 压缩(需 ECOLLINK_DEEPSEEK_API_KEY)
+POST /memory/snapshot        # 生成池快照(snapshots/<hash>.json + latest.json)
 GET  /memory/pool            # 完整记忆池(popup 查询)
 GET  /memory/recent?n=10     # 最近 N 条
 GET  /memory/session/{id}    # 指定会话的记忆
-GET  /memory/status          # 条数/压缩状态/各会话数量
+GET  /memory/snapshots       # 快照清单(latest 指向)
+GET  /memory/diff?since=H    # 与快照对比(added/removed/updated,含会话池)
+GET  /memory/suggestions     # 待确认建议清单(suggestions.json,与 memory.json 分离)
+GET  /memory/stale?days=5    # 过时记忆清单(压缩流程用)
+GET  /memory/status          # 条数/归档数/各会话数量
 ```
 
 ## 8. 与现有插件的联动(保持 v1)
@@ -280,7 +297,7 @@ memory_bridge:
 | 模型标签服从性:不吐 memory_write 标签 | 手动保存兜底 + 收割侧黑名单校验(DSM `isValidMemoryWrite` 模式) |
 | 注入污染聊天历史 | §3.4 三件套 + 发送侧剥离 |
 | bridge 服务未启动 | 扩展离线队列 + 重连补发 |
-| 并发写 memory.json | bridge 服务唯一写者,DSH 只读 |
+| 并发写 memory.json | bridge 服务唯一写者(DSH 只发请求不写盘);建议确认队列进一步收敛写入 |
 | 时区错乱 | 存储统一 UTC,渲染转本地 |
 | Chrome Web Store 审查 | 权限最小化(storage + chat.deepseek.com + 127.0.0.1 host_permissions);三模板均已上架,先例充分 |
 
@@ -295,6 +312,8 @@ memory_bridge:
 | 3c | popup 配置面板 + 会话管理 + DSM 一键导入 + 压缩提醒 | ✅ 2026-09-10 完成(popup 四区:压缩一键流程/配置/会话管理/DSM 导入;压缩状态机:开始→旧清单快照→新对话注入压缩指令→收割新 key→结束按"内容未变才删"比对删除;服务端 /memory/stale + /memory/delete;服务/扩展 README 同步) |
 | 4 | DSH 适配层:直读 memory.json + `--session` 过滤 + 两个插件的联动开关 | ✅ v0(2026-09-10):`adapter/` 直读池(mtime 缓存只读)+ pre-step 注入(同源选择器+块标记幂等+singleInjection)+ `#记忆名` 过滤,8 项冒烟全过。DSH CLI 实测无 `--session`(只有 `--resume <session>` 且期望会话 id),"按命名会话自动绑定"待 DSH 能力;两插件联动开关待适配层稳定后启用 |
 | 5 | 文档 + 博客 + awesome 更新 | ✅ 仓库 v0 已整备(git 08fba67,含根 README/LICENSE/三组件文档,已存档 E 盘两克隆待推 GitHub);迭代博客待 9-14 新模型后写 |
+| 6 | **v0.1.1 迭代(E0–E8)+ adapter v1.1 服务自动拉起** | ✅ 代码级完成(2026-09-13/14):E0 离线队列并发修复、E1 通道分离、E2 skill、E3 快照/diff、E4 /ecolink-push、E5 建议确认队列、E6 面板+badge、E7 静音+黑名单、E8 鉴权;v1.1 serviceGuard 自动拉起 + scripts 自启。测试 12/66/14 全绿;**未提交未发布**,手工验收进行中(ZZ 清单 + 12 号文档更正) |
+| 7 | **DSH 侧确认点(2026-09-14 设计纠正的待实现项)** | ⬜ 未开始:pre-step 检测到新增网页端记忆时,向用户询问"要不要扫描网页端记忆"(确认点从网页端入池闸门移至此;在实现前 DSH 侧见到的网页记忆未经确认,与设计意图一致) |
 
 ## 11. 与现有方案的差异(更新)
 

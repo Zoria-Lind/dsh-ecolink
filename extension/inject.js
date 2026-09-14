@@ -18,8 +18,14 @@
   const SCOPE_PREFIX = '[dsh-ecolink 记忆]'
   const SCOPE_SUFFIX = '[/dsh-ecolink 记忆]'
   const COMPLETION_RE = /\/api\/v0\/chat\/completion/
-  const HISTORY_RE = /\/api\/v0\/(chat_session|conversation)|chat_session|fetch_page/
-  const MARKER_RE = /DSM:memory_write|<dsmemory>|MEMORY_SYSTEM|\[dsh-ecolink 记忆\]/
+  const HISTORY_RE = /\/api\/v0\/(chat_session|conversation|chat\/edit_message)|chat_session|fetch_page/
+  const EDIT_RE = /\/api\/v0\/chat\/edit_message/
+  // DSM 同款快路径:含通用 <DSM: 前缀/闭合(历史残留可能不包 <dsmemory> 壳,如 <DSM:SKILLS>)
+  const MARKER_RE = /DSM:memory_write|<dsmemory>|MEMORY_SYSTEM|<DSM:|<\/DSM:|&lt;DSM:|&lt;\/DSM:|\[dsh-ecolink 记忆\]|\[dsh-ecolink 指令\]/
+  // E1 指令通道标记(与 core/prompt.mjs 的 INSTRUCTION_* 镜像;经典脚本不能 import,注释锁死同步)
+  const INSTRUCTION_PREFIX = '[dsh-ecolink 指令]'
+  const INSTRUCTION_SUFFIX = '[/dsh-ecolink 指令]'
+  const INSTRUCTION_BLOCK_RE = new RegExp(INSTRUCTION_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s\\S]*?' + INSTRUCTION_SUFFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')
 
   const FLAG = (k) => { try { return window.localStorage.getItem(k) === '1' } catch { return false } }
   const KILL = FLAG('ecolink_kill')
@@ -28,17 +34,19 @@
   if (KILL) { dbg('保险丝生效,页面侧全部退出'); return }
 
   // ---- 页内同步配置与池缓存(content 经 CustomEvent 推送) ----
-  let settings = { injectEnabled: true, harvestEnabled: true, singleInjection: true, maxInjectionChars: 3000 }
+  // 页内镜像只需背景层推送后会用到的键(E6 起单一来源在 core/config.mjs,经典脚本不能
+  // import,此处仅保留子集;新增键经"存在才合并"自动带过来,不必在此补全)
+  let settings = { injectEnabled: true, harvestEnabled: true, singleInjection: true, maxInjectionChars: 3000, panelEnabled: true, muted: false, contentInjectionEnabled: true }
   let pool = { shared_pool: [], session_pools: {} }
   let compressMode = { active: false, oldItems: [] }
   let compressInjected = false // 压缩块每页只注入一次
   let lastSid = ''
-  const injectedSessions = new Set() // 页内 singleInjection(与 DSM 的 b Set 同构)
+  const injectedSessions = new Set() // 压缩块每页一次的去重集合(常规注入去重见 sessionMemBase)
 
   function dispatchToContent(detail) {
     try { window.dispatchEvent(new CustomEvent('ecolink:page', { detail: JSON.stringify(detail) })) } catch { /* fail-open */ }
   }
-  // 诊断事件:经 content→background→服务日志,Claude 侧可直接读(免用户翻控制台)
+  // 诊断事件:经 content→background→服务日志落盘,可直接读日志定位(免用户翻控制台)
   const diag = (msg) => { dbg(msg); dispatchToContent({ type: 'diag', msg: `${VERSION} ${msg}` }) }
   window.addEventListener('ecolink:cu', (e) => {
     try {
@@ -79,6 +87,13 @@
     if (String(key ?? '').toLowerCase() === 'user_name' && content.length < 2) return false
     return true
   }
+  // DSM scanner 同款状态化规则:已有 user_name 且新值与旧值不同时,
+  // 新值长度<3 或含数字 = 疑似垃圾,拒绝覆盖(页内池缓存为权威近似)
+  function userNameBlocked(content) {
+    const existing = (pool.shared_pool ?? []).find((m) => String(m.key ?? '').toLowerCase() === 'user_name')
+    if (!existing || existing.content === content) return false
+    return content.length < 3 || /\d/.test(content)
+  }
   function parseMemoriesFromText(text) {
     // 前端可能把标签转义渲染(&lt;DSM:memory_write&gt;),先还原再解析(DSM Gr 同款)
     const s = String(text ?? '').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
@@ -94,7 +109,11 @@
       const attr = /^<DSM:memory_write\s+key="([^"]*)"\s+importance="(always|called)">([\s\S]*?)<\/DSM:memory_write>$/i.exec(raw)
       if (attr) {
         const content = attr[3].trim()
-        if (validContent(content, attr[1].trim())) out.push({ content, importance: attr[2] === 'always' ? 'key' : 'called', source: 'web', key: attr[1].trim() || null })
+        const key = attr[1].trim()
+        if (validContent(content, key)) {
+          if (key.toLowerCase() === 'user_name' && userNameBlocked(content)) continue
+          out.push({ content, importance: attr[2] === 'always' ? 'key' : 'called', source: 'web', key: key || null })
+        }
         continue
       }
       // 纯文本形式(可带 importance:xxx| 前缀)
@@ -109,89 +128,104 @@
   // 简单内容指纹(去重用;非加密)
   function contentFp(text) { return text.length + ':' + text.slice(0, 40) + ':' + text.slice(-40) }
 
-  // ---- 注入选择(打分 + 预算 + #记忆名) ----
-  function bigrams(s) { const t = String(s ?? ''); const set = new Set(); for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2)); return set }
-  function selectMemories(items, prompt, budget) {
-    const pLower = String(prompt ?? '').toLowerCase()
-    const pb = bigrams(pLower)
-    const words = pLower.split(/[^\w一-龥]+/).filter((w) => w.length >= 2)
-    const now = Date.now()
-    const scored = (items ?? []).map((item) => {
-      const c = String(item?.content ?? '')
-      let score = 0
-      const cb = bigrams(c)
-      for (const g of cb) if (pb.has(g)) score += 5
-      const cl = c.toLowerCase()
-      for (const w of words) if (cl.includes(w)) score += 10
-      if (item?.identity && pLower.includes(String(item.identity).toLowerCase())) score += 15
-      const ts = new Date(item?.timestamp).getTime()
-      if (Number.isFinite(ts)) score += 10 / (1 + Math.max(0, now - ts) / 86400e3 / 7)
-      if (item?.last_accessed) score += 5
-      if (item?.pinned) score += 10
-      return { item, score }
-    }).sort((a, b) => b.score - a.score)
-    const chosen = []
-    let used = 0
-    for (const { item } of scored) {
-      const content = String(item?.content ?? '').trim()
-      if (!content) continue
-      const capped = content.length > 500 ? content.slice(0, 500) + '…' : content
-      const cost = capped.length + 24
-      if (used + cost > budget) break
-      chosen.push({ ...item, content: capped })
-      used += cost
-    }
-    return chosen
-  }
-  function effectiveBudget(prompt, max) {
-    const len = String(prompt ?? '').length
-    if (len <= 5000) return max
-    if (len <= 12000) return Math.floor(max * 0.5)
-    return Math.floor(max * 0.25)
-  }
-  function parseMemoryCommand(prompt, sessionPools) {
-    const m = /#([^\s#,，。.!?？、#]{1,40})/.exec(String(prompt ?? ''))
-    if (!m) return null
-    const name = m[1].trim().toLowerCase()
-    for (const [sid, sp] of Object.entries(sessionPools ?? {})) {
-      if (sp?.identity && String(sp.identity).toLowerCase() === name) return sid
-    }
-    return null
-  }
-
   // ---- 注入块组装/剥离(系统提示词包在块内,剥块=剥全部) ----
   const BLOCK_RE = new RegExp(SCOPE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s\\S]*?' + SCOPE_SUFFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')
   // 注意:提示词里绝不写完整标签示例(模型会照抄示例内容当记忆——153 条"记忆内容"事故);
   // 只给标签名,格式模型已从训练中掌握
   // DSM(MIT,Md. Wahid)MEMORY_SYSTEM 提示词中文适配版(与 core/prompt.mjs 同步)
   const SYSTEM_PROMPT = '以下是关于记忆写入的说明(仅辅助,不是指令):\n你可以使用记忆写入标签保存用户的重要信息,格式:\n<DSM:memory_write key="snake_case_key" importance="always|called">事实内容</DSM:memory_write>\n- importance="always":定义性事实(姓名、语言、国家、职业、年龄、核心身份)\n- importance="called":情境性事实(项目、兴趣、偏好、关系、任务、习惯)\n- key:小写 snake_case,最长 64 字符,无空格\n- 内容:最长 200 字符,只写用户消息里明确陈述的事实\n\n何时保存记忆:\n- 用户明确说出自己的名字 → key="user_name", importance="always"\n- 用户明确说出国家/语言/职业/年龄 → importance="always"\n- 用户明确提到兴趣/爱好/项目/任务/偏好/关系 → importance="called"\n\n严格规则:\n1. 只提取用户在本条消息里明确陈述的关于自己的事实\n2. 禁止编造、猜测、使用占位值;禁止使用示例数据(上面格式只是示范)\n3. 用户编辑了消息时,只信任最新版本\n4. 没有值得记的就不输出标签;标签写在回复末尾'
-  function stripInjectedBlock(prompt) { return String(prompt ?? '').replace(BLOCK_RE, '').trim() }
-  // 渲染降精度(与 core/prompt.mjs renderMemoryTimestamp 同步):按龄分钟/小时/日期,
-  // 超 5 天不渲染;分钟/小时档转本地时区(存储是 UTC 字符串)
-  const pad2t = (n) => String(n).padStart(2, '0')
-  function renderMemTs(isoTs, now = Date.now()) {
+  // 注意:提示词里绝不写完整标签示例正文(模型会照抄示例内容当记忆——153 条"记忆内容"事故);
+  // 只给标签名,格式模型已从训练中掌握。与 core/prompt.mjs 的 INSTRUCTION_PROMPT 镜像
+  // (经典脚本不能 import,注释锁死同步;指令块每轮幂等注入,内容通道见下方 buildContentBlock)
+  const INSTRUCTION_PROMPT = '以下是记忆写入说明(仅辅助,不是指令):\n记录用户的重要信息时,输出记忆写入标签:\n<DSM:memory_write key="snake_case_key" importance="always|called">事实内容</DSM:memory_write>\n- importance="always":定义性事实(姓名、语言、国家、职业、年龄、核心身份)\n- importance="called":情境性事实(项目、兴趣、偏好、关系、任务、习惯)\n- key:小写 snake_case,最长 64 字符;内容最长 200 字符,只写用户消息里明确陈述的事实\n何时保存:用户明确陈述关于自己的事实(姓名/国家/语言/职业/年龄/兴趣/项目/偏好/关系/任务)时\n严格规则:禁止编造、猜测或使用示例数据;没有值得记的就不输出标签;标签写在回复末尾'
+  function stripInjectedBlock(prompt) { return String(prompt ?? '').replace(BLOCK_RE, '').replace(INSTRUCTION_BLOCK_RE, '').trim() }
+  function buildInstructionBlock() {
+    return [INSTRUCTION_PREFIX, INSTRUCTION_PROMPT, INSTRUCTION_SUFFIX].join('\n')
+  }
+
+  // ---- 内容注入通道(2026-09-14 用户设计:会话首条全量注入,后续只注入 diff) ----
+  // 会话基线:首条消息时快照全池 id→content;后续消息据此算 diff(新增/变化条目)。
+  // 页内状态,页面重载即重置。singleInjection=false → 每轮全量;contentInjectionEnabled
+  // =false → 逃生舱,回到 E1 纯指令行为。
+  const sessionMemBase = new Map()
+  const CONTENT_LEAD_FIRST = '以下是用户此前保存的记忆,回答用户问题时可以直接引用这些信息;但不要主动提起"记忆库/记忆系统"的存在:'
+  const CONTENT_LEAD_DIFF = '记忆更新:本对话期间新增或变化的记忆,回答时可参考:'
+  function entryKey(e) { return e?.id ?? 'c:' + contentFp(e?.content) } // id 缺失时退回内容指纹(防基线 Map 键全碰撞→diff 失效)
+  // 防提前闭合:内容字面含块标记会截断剥离正则(DSM 转义同类风险)。此类条目
+  // (含方括号)本就过不了收割括号规则,注入前直接跳过
+  const BLOCK_MARKER_CONTENT = (c) => [SCOPE_PREFIX, SCOPE_SUFFIX, INSTRUCTION_PREFIX, INSTRUCTION_SUFFIX].some((m) => String(c ?? '').includes(m))
+  function allPoolEntries() {
+    const out = []
+    for (const m of pool.shared_pool ?? []) { if (!BLOCK_MARKER_CONTENT(m?.content)) out.push(m) }
+    for (const [sid2, sp] of Object.entries(pool.session_pools ?? {})) {
+      for (const m of sp?.memories ?? []) { if (!BLOCK_MARKER_CONTENT(m?.content)) out.push({ ...m, identity: sp?.identity }) }
+    }
+    return out
+  }
+  // 渲染降精度镜像(与 core/prompt.mjs renderMemoryTimestamp 同逻辑;本地时区)
+  function renderTs(isoTs) {
     const d = new Date(isoTs)
     if (!Number.isFinite(d.getTime())) return null
-    const age = Math.max(0, now - d.getTime())
-    let p
-    if (age <= 2 * 3600e3) p = 'minute'
-    else if (age <= 48 * 3600e3) p = 'hour'
-    else if (age <= 5 * 86400e3) p = 'day'
-    else return null
-    const date = d.getFullYear() + '-' + pad2t(d.getMonth() + 1) + '-' + pad2t(d.getDate())
-    if (p === 'day') return date
-    if (p === 'hour') return date + ' ' + pad2t(d.getHours()) + ':00'
-    return date + ' ' + pad2t(d.getHours()) + ':' + pad2t(d.getMinutes())
+    const age = Math.max(0, Date.now() - d.getTime())
+    if (age > 5 * 86400e3) return null
+    const pad = (n) => String(n).padStart(2, '0')
+    const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    if (age > 48 * 3600e3) return date
+    if (age > 2 * 3600e3) return `${date} ${pad(d.getHours())}:00`
+    return `${date} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   }
-  function buildBlock(memories, sessionName) {
-    const lines = [SCOPE_PREFIX, SYSTEM_PROMPT]
-    if (sessionName) lines.push('[会话:' + sessionName + ']')
+  function buildContentBlock(memories, sessionName, lead) {
+    const lines = [SCOPE_PREFIX, lead]
+    if (sessionName) lines.push(`[会话:${sessionName}]`)
     for (const m of memories ?? []) {
-      const ts = m?.timestamp ? renderMemTs(m.timestamp) : null
-      lines.push(ts ? '- (' + ts + ') ' + (m?.content ?? '') : '- ' + (m?.content ?? ''))
+      const ts = m?.timestamp ? renderTs(m.timestamp) : null
+      lines.push(ts ? `- (${ts}) ${m?.content ?? ''}` : `- ${m?.content ?? ''}`)
     }
     lines.push(SCOPE_SUFFIX)
     return lines.join('\n')
+  }
+  // 打分/预算镜像(与 core/selector.mjs 同逻辑)
+  function bigrams(s) { const t = String(s ?? ''); const set = new Set(); for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2)); return set }
+  function scoreItem(item, prompt, now) {
+    const pLower = String(prompt ?? '').toLowerCase()
+    const pb = bigrams(pLower)
+    const c = String(item?.content ?? '')
+    const cb = bigrams(c)
+    let hits = 0
+    for (const g of cb) if (pb.has(g)) hits += 1
+    const words = pLower.split(/[^\w一-龥]+/).filter((w) => w.length >= 2)
+    const cl = c.toLowerCase()
+    for (const w of words) if (cl.includes(w)) hits += 2
+    let score = Math.min(20, hits * 5)
+    if (item?.identity && pLower.includes(String(item.identity).toLowerCase())) score += 15
+    const ts = new Date(item?.timestamp).getTime()
+    if (Number.isFinite(ts)) score += 10 / (1 + Math.max(0, now - ts) / 86400e3 / 7)
+    if (item?.last_accessed) score += 5
+    if (item?.pinned) score += 10
+    return score
+  }
+  function selectMemories(items, prompt, budgetChars) {
+    const now = Date.now()
+    const scored = (items ?? []).map((item) => ({ item, score: scoreItem(item, prompt, now) }))
+      .sort((a, b) => b.score - a.score || String(b.item?.timestamp ?? '').localeCompare(String(a.item?.timestamp ?? '')))
+    const chosen = []
+    let used = 0
+    for (const { item } of scored) {
+      const content = String(item?.content ?? '').trim()
+      if (!content) continue
+      const capped = content.length > 500 ? content.slice(0, 500) + '…' : content
+      const cost = capped.length + 24 // 条目头部格式开销
+      if (used + cost > budgetChars) break
+      chosen.push({ ...item, content: capped })
+      used += cost
+    }
+    return chosen
+  }
+  function effectiveBudget(prompt, maxInjectionChars) {
+    const len = String(prompt ?? '').length
+    if (len <= 5000) return maxInjectionChars
+    if (len <= 12000) return Math.floor(maxInjectionChars * 0.5)
+    return Math.floor(maxInjectionChars * 0.25)
   }
 
   // ---- 压缩指令块(PLAN §4.4 v3:一键压缩流程的注入形态) ----
@@ -212,41 +246,54 @@
   }
 
   // ---- 请求 payload 注入(DSM O() 模式:同步、防残留、改即发) ----
-  // 核心注入函数:对一段用户文本做压缩块/记忆块注入,返回注入后的文本(未变则原样)
+  // 核心注入函数:压缩块(用户显式触发)优先;常规路径 = 指令块每轮幂等(先剥旧块再拼新块,
+  // 原文不变则不重发)+ 内容通道(2026-09-14 用户设计:会话首条全量、后续 diff,
+  // 见上方 buildContentBlock/sessionMemBase;contentInjectionEnabled=false 关闭)
   function injectText(text, sid) {
     // 压缩模式优先:新对话第一条消息注入压缩指令块(每页一次)
     if (compressMode.active && !compressInjected) {
       compressInjected = true
       injectedSessions.add(sid)
+      dispatchToContent({ type: 'compress-seen', session_id: sid }) // 背景层据此只计压缩会话的收割
       const composed = buildCompressBlock(compressMode.oldItems ?? []) + '\n\n' + stripInjectedBlock(text)
       diag('压缩模式:注入压缩指令块(' + (compressMode.oldItems?.length ?? 0) + ' 条旧记忆)')
       return composed
     }
-    if (settings.singleInjection && injectedSessions.has(sid)) { dbg('本页已注入过该会话,跳过'); return text }
     const clean = stripInjectedBlock(text)
-    const cmd = parseMemoryCommand(clean, pool.session_pools)
-    let items, sessionName = null
-    if (cmd) {
-      const sp = pool.session_pools[cmd]
-      items = (sp?.memories ?? []).map((m) => ({ ...m, identity: sp?.identity }))
-      sessionName = sp?.identity
-    } else {
-      items = [
-        ...(pool.shared_pool ?? []),
-        ...Object.entries(pool.session_pools ?? {}).flatMap(([, sp]) => (sp?.memories ?? []).map((m) => ({ ...m, identity: sp?.identity }))),
-      ]
-      const own = pool.session_pools?.[sid]
-      if (own?.identity) sessionName = own.identity
+    const instr = buildInstructionBlock() + '\n\n' + clean
+    // 内容通道(2026-09-14 用户设计):会话首条全量注入,后续只注入 diff(新增/变化条目)
+    if (settings.injectEnabled && !settings.muted && settings.contentInjectionEnabled !== false) {
+      const entries = allPoolEntries()
+      if (entries.length > 0) {
+        const useBase = settings.singleInjection !== false
+        const base = useBase ? sessionMemBase.get(sid) : null
+        let chosen = null
+        let sessionName = null
+        let lead = CONTENT_LEAD_FIRST
+        if (!base) {
+          chosen = selectMemories(entries, clean, effectiveBudget(clean, settings.maxInjectionChars))
+          sessionName = pool.session_pools?.[sid]?.identity || null
+          if (useBase) sessionMemBase.set(sid, new Map(entries.map((e) => [entryKey(e), e.content])))
+        } else {
+          const diff = entries.filter((e) => !base.has(entryKey(e)) || base.get(entryKey(e)) !== e.content)
+          if (diff.length > 0) {
+            chosen = selectMemories(diff, clean, effectiveBudget(clean, settings.maxInjectionChars))
+            for (const e of diff) base.set(entryKey(e), e.content)
+            lead = CONTENT_LEAD_DIFF
+          }
+        }
+        if (chosen && chosen.length > 0) {
+          const ids = chosen.map((m) => m.id).filter(Boolean)
+          if (ids.length) dispatchToContent({ type: 'touch', ids }) // 选择器自举:访问计数反哺打分
+          diag('内容块注入 ' + chosen.length + ' 条, sid=' + String(sid).slice(0, 8))
+          dbg('内容块注入: ' + chosen.length + ' 条, sid=' + sid)
+          return buildContentBlock(chosen, sessionName, lead) + '\n\n' + instr
+        }
+      }
     }
-    const budget = effectiveBudget(clean, settings.maxInjectionChars)
-    const memories = selectMemories(items, clean, budget)
-    const composed = buildBlock(memories, sessionName) + '\n\n' + clean
-    injectedSessions.add(sid)
-    if (memories.some((m) => m.id)) {
-      dispatchToContent({ type: 'touch', ids: memories.map((m) => m.id).filter(Boolean) })
-    }
-    dbg('注入完成: ' + memories.length + ' 条记忆, sid=' + sid)
-    return composed
+    if (instr === text) return text // 幂等:无变化则原样
+    dbg('指令块注入, sid=' + sid)
+    return instr
   }
 
   // payload 多形态解析(DSM C/I/_/v 同款兼容):
@@ -284,15 +331,40 @@
     return { changed: false }
   }
 
+  // 编辑保存路径的"只剥不注入":上一轮注入块可能被前端带进编辑框,编辑保存时
+  // 必须剥掉,否则注入块会当用户原文二次上送/存储(DSM 编辑框剥离的同源防护)
+  function stripPayloadBlocks(payload) {
+    let changed = false
+    const cleanStr = (s) => {
+      const u = String(s ?? '').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+      const c = u.replace(/<DSM:memory_write(?:[^>]*)>[\s\S]*?<\/DSM:memory_write>/gi, '').replace(BLOCK_RE, '').replace(INSTRUCTION_BLOCK_RE, '')
+      if (c !== String(s ?? '')) { changed = true; return c }
+      return s
+    }
+    if (typeof payload.prompt === 'string') payload.prompt = cleanStr(payload.prompt)
+    const msgs = Array.isArray(payload.messages) ? payload.messages
+      : (Array.isArray(payload.data?.messages) ? payload.data.messages
+      : (Array.isArray(payload.chat?.messages) ? payload.chat.messages : null))
+    if (msgs) {
+      for (const m of msgs) {
+        if (typeof m?.content === 'string') m.content = cleanStr(m.content)
+        else if (Array.isArray(m?.content)) {
+          for (const t of m.content) if (t && typeof t.text === 'string') t.text = cleanStr(t.text)
+        }
+      }
+    }
+    return changed
+  }
+
   // ---- 历史接口响应整包清洗(DSM E 模式:克隆→文本→清洗→新 Response) ----
   function scrubValue(v, depth) {
     if (v == null || depth > 8) return v
     if (typeof v === 'string') {
-      if (!v.includes(TAG) && !v.includes(SCOPE_PREFIX) && !v.includes('MEMORY_SYSTEM')) return v
+      if (!v.includes(TAG) && !v.includes(SCOPE_PREFIX) && !v.includes('MEMORY_SYSTEM') && !v.includes(INSTRUCTION_PREFIX)) return v
       return v.replace(/<MEMORY_SYSTEM[^>]*>[\s\S]*?<\/MEMORY_SYSTEM>/gi, '')
         .replace(/<dsmemory[^>]*>[\s\S]*?<\/dsmemory>/gi, '')
         .replace(/<DSM:[A-Za-z0-9_:]+[^>]*>[\s\S]*?<\/DSM:[A-Za-z0-9_:]+>/gi, '')
-        .replace(BLOCK_RE, '')
+        .replace(BLOCK_RE, '').replace(INSTRUCTION_BLOCK_RE, '')
     }
     if (Array.isArray(v)) return v.map((x) => scrubValue(x, depth + 1))
     if (typeof v === 'object') { const o = {}; for (const [k, x] of Object.entries(v)) o[k] = scrubValue(x, depth + 1); return o }
@@ -306,7 +378,7 @@
       const url = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : (input instanceof Request ? input.url : String(input)))
       const isCompletion = COMPLETION_RE.test(url) && !HISTORY_RE.test(url)
 
-      if (isCompletion && settings.injectEnabled) {
+      if (isCompletion && settings.injectEnabled && !settings.muted) {
         // 请求注入:body 提取(异步,无跨上下文等待)+ 同步注入
         let bodyText = null
         if (init && typeof init.body === 'string') bodyText = init.body
@@ -345,7 +417,26 @@
         return teeHarvest(resp, lastSid)
       }
 
-      if (HISTORY_RE.test(url) && settings.harvestEnabled) {
+      if (EDIT_RE.test(url)) {
+        // 编辑保存:只剥不注入——上一轮注入块可能被带进编辑框,剥掉防止当用户原文
+        // 二次上送。剥后有变化则用重建 init 重发(不依赖 arguments,参数重赋值无效)
+        let bodyText = null
+        if (init && typeof init.body === 'string') bodyText = init.body
+        else if (input instanceof Request) { try { bodyText = await input.clone().text() } catch { /* fallthrough */ } }
+        if (bodyText) {
+          try {
+            const payload = JSON.parse(bodyText)
+            if (payload && typeof payload === 'object' && stripPayloadBlocks(payload)) {
+              const headers = new Headers((init && init.headers) || (input instanceof Request ? input.headers : undefined))
+              headers.set('content-type', 'application/json')
+              const init2 = { ...init, headers, body: JSON.stringify(payload) }
+              return await origFetch.call(this, typeof input === 'string' || input instanceof URL ? input : input.url, init2)
+            }
+          } catch { /* 非 JSON:放行 */ }
+        }
+      }
+
+      if (HISTORY_RE.test(url) && settings.harvestEnabled && !settings.muted) {
         // 历史接口响应清洗(防注入块持久化进前端历史)+ 历史数据收割
         const resp = await origFetch.apply(this, arguments)
         try {
@@ -358,7 +449,7 @@
           const rawMemories = parseMemoriesFromText(text)
           if (rawMemories.length > 0) {
             const filtered = compressMode.active
-              ? rawMemories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content))
+              ? rawMemories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content) && !INSTRUCTION_PROMPT.includes(m.content))
               : rawMemories
             const fresh = filtered.filter((m) => {
               const mfp = contentFp(m.content)
@@ -399,7 +490,7 @@
       }
       XHR.prototype.send = function (body) {
         try {
-          if (settings.injectEnabled && COMPLETION_RE.test(this.__ecolinkUrl ?? '') && typeof body === 'string') {
+          if (settings.injectEnabled && !settings.muted && COMPLETION_RE.test(this.__ecolinkUrl ?? '') && typeof body === 'string') {
             try {
               const payload = JSON.parse(body)
               if (payload && typeof payload === 'object') {
@@ -408,8 +499,15 @@
               }
             } catch { /* 非 JSON:放行 */ }
           }
+          // 编辑保存:只剥不注入(同 fetch 侧;XHR 参数重赋值有效,直接改 body)
+          if (EDIT_RE.test(this.__ecolinkUrl ?? '') && typeof body === 'string') {
+            try {
+              const payload = JSON.parse(body)
+              if (payload && typeof payload === 'object' && stripPayloadBlocks(payload)) body = JSON.stringify(payload)
+            } catch { /* 非 JSON:放行 */ }
+          }
           // 历史接口响应清洗(DSM J() 同款:load 后 scrubbed + defineProperty)
-          if (settings.harvestEnabled && HISTORY_RE.test(this.__ecolinkUrl ?? '')) {
+          if (settings.harvestEnabled && !settings.muted && HISTORY_RE.test(this.__ecolinkUrl ?? '')) {
             this.addEventListener('load', () => {
               try {
                 const raw = this.responseText
@@ -455,7 +553,7 @@
       }
       // 压缩模式:拒绝"指令自身的片段"(模型回显语法描述——实测事故)
       if (compressMode.active) {
-        memories = memories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content))
+        memories = memories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content) && !INSTRUCTION_PROMPT.includes(m.content))
       }
       // 按记忆内容指纹再过滤:同一内容出现在多个节点/多条消息只收一次
       // (153 条"记忆内容"事故的第二道闸)
@@ -465,13 +563,13 @@
         harvestedFp.add(mfp)
         return true
       })
-      if (fresh.length > 0) {
+      if (fresh.length > 0 && !settings.muted) {
         diag('DOM 收割 ' + fresh.length + ' 条: ' + fresh.map((m) => m.content.slice(0, 24)).join(' | '))
         dispatchToContent({ type: 'harvest', memories: fresh, session_id: lastSid })
       }
       // 剥离(DSM Gr 同款:先还原转义,再同时剥原始与转义形式,防残留 &lt; 垃圾)
       const unescaped = text.replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
-      const cleaned = unescaped.replace(/<DSM:memory_write(?:[^>]*)>[\s\S]*?<\/DSM:memory_write>/gi, '').replace(BLOCK_RE, '')
+      const cleaned = unescaped.replace(/<DSM:memory_write(?:[^>]*)>[\s\S]*?<\/DSM:memory_write>/gi, '').replace(BLOCK_RE, '').replace(INSTRUCTION_BLOCK_RE, '')
       if (cleaned !== text) {
         safeDomMutation(() => {
           if (cleaned.trim()) node.textContent = cleaned
@@ -486,10 +584,44 @@
   function walkDom() {
     try {
       if (!document.body) return
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+      // DSM 同款守卫:只遍历"含标记"的文本节点且单节点 ≤50000 字符,
+      // 不做全树无差别扫描(长文档/高频 characterData 下的 CPU 尖峰)
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          const t = n.textContent
+          if (!t || t.length > 50000 || !MARKER_RE.test(t)) return NodeFilter.FILTER_REJECT
+          return NodeFilter.FILTER_ACCEPT
+        },
+      })
       let n
       while ((n = walker.nextNode())) {
         if (n.textContent && n.textContent.includes(TAG)) harvestAndStripNode(n)
+      }
+    } catch { /* fail-open */ }
+  }
+  // 编辑框剥离(DSM scanner 同款):用户点"编辑"时输入框会带出注入块原文,
+  // 就地剥掉,防止编辑保存时旧块原样上送二次存储
+  function stripEditTextareas() {
+    try {
+      if (!document.body) return
+      const selectors = ['textarea[class*="edit"]', 'textarea[class*="message"]', 'div[contenteditable="true"]', '[class*="edit"] textarea', '[class*="edit"] [contenteditable="true"]', 'textarea']
+      for (const selector of selectors) {
+        let elements
+        try { elements = document.querySelectorAll(selector) } catch { continue }
+        for (const el of elements) {
+          const value = el.value || el.textContent || ''
+          if (!MARKER_RE.test(value)) continue
+          const unescaped = value.replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+          const cleaned = unescaped.replace(/<DSM:memory_write(?:[^>]*)>[\s\S]*?<\/DSM:memory_write>/gi, '').replace(BLOCK_RE, '').replace(INSTRUCTION_BLOCK_RE, '')
+          if (cleaned !== value) {
+            if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+              el.value = cleaned
+              try { el.dispatchEvent(new Event('input', { bubbles: true })) } catch { /* ignore */ } // React 变更感知
+            } else {
+              el.textContent = cleaned
+            }
+          }
+        }
       }
     } catch { /* fail-open */ }
   }
@@ -498,8 +630,16 @@
   let rafStart = performance.now()
   const rafLoop = () => { walkDom(); if (performance.now() - rafStart < 3000) requestAnimationFrame(rafLoop) }
   requestAnimationFrame(rafLoop)
+  // 周期兜底扫描 + 编辑框剥离(DSM 1.5s period 同款;TreeWalker 有 acceptNode 过滤,
+  // 选择器有限,空闲开销可忽略)
+  setInterval(() => { safeDomMutation(() => { walkDom(); stripEditTextareas() }) }, 1500)
+  // 用户在编辑框里打字时也要剥(React 合成 input 冒泡到 document,DSM 同款)
+  let editTimer = null
+  document.addEventListener('input', () => { if (editTimer) clearTimeout(editTimer); editTimer = setTimeout(() => stripEditTextareas(), 300) }, true)
+  let moTimer = null
   try {
-    domObserver = new MutationObserver(() => walkDom())
+    // DSM 内容侧同款 100ms 防抖:streaming 高频 characterData 不再每次 mutation 全量扫
+    domObserver = new MutationObserver(() => { if (moTimer) clearTimeout(moTimer); moTimer = setTimeout(() => safeDomMutation(() => { walkDom(); stripEditTextareas() }), 100) })
     const startObserve = () => { try { domObserver.observe(document.body, { subtree: true, childList: true, characterData: true }) } catch { /* ignore */ } }
     if (document.body) startObserve()
     else document.addEventListener('DOMContentLoaded', startObserve, { once: true })
@@ -510,7 +650,7 @@
   // 的任何字节与节奏。行首标签被前端当 HTML 块吞、SPA 从 IndexedDB 恢复历史
   // 都不影响——标签在源头必然存在(函数声明提升,fetch patch 可提前引用)
   function teeHarvest(resp, sessionId) {
-    if (!settings.harvestEnabled || !resp?.ok || !resp?.body || typeof resp.body.tee !== 'function') return resp
+    if (settings.muted || !settings.harvestEnabled || !resp?.ok || !resp?.body || typeof resp.body.tee !== 'function') return resp
     try {
       const [appBranch, scanBranch] = resp.body.tee()
       ;(async () => {
@@ -525,7 +665,7 @@
           }
           let memories = parseMemoriesFromText(acc)
           if (compressMode.active) {
-            memories = memories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content))
+            memories = memories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content) && !INSTRUCTION_PROMPT.includes(m.content))
           }
           const fresh = memories.filter((m) => {
             const mfp = contentFp(m.content)
@@ -542,6 +682,35 @@
       return new Response(appBranch, { status: resp.status, statusText: resp.statusText, headers: resp.headers })
     } catch { return resp }
   }
+
+  // ---- E6 面板手动插入(面板在隔离世界,经 CustomEvent 请求 MAIN world 执行) ----
+  // React 受控输入:textarea 用原生 value setter + input 事件;contenteditable 用 insertText
+  function insertIntoInput(text) {
+    const value = String(text ?? '')
+    if (!value) return false
+    const target = document.querySelector('textarea:not([disabled]):not([readonly])') || document.querySelector('[contenteditable="true"]')
+    if (!target) { dbg('未找到输入框,插入失败'); return false }
+    try {
+      if (target.isContentEditable) {
+        target.focus()
+        document.execCommand('insertText', false, value)
+      } else {
+        const proto = Object.getPrototypeOf(target)
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value') || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
+        desc?.set?.call(target, value)
+        target.dispatchEvent(new Event('input', { bubbles: true }))
+        target.focus()
+      }
+      dbg('面板插入完成(' + value.length + ' 字符)')
+      return true
+    } catch { return false }
+  }
+  window.addEventListener('ecolink:panel', (e) => {
+    try {
+      const d = JSON.parse(e.detail)
+      if (d?.type === 'insert' && d.text) insertIntoInput(d.text)
+    } catch { /* fail-open */ }
+  })
 
   dbg('inject.js v2 已就绪(DSM 架构)')
 })()

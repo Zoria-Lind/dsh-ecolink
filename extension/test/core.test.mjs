@@ -39,9 +39,10 @@ test('prompt:renderMemoryTimestamp 渲染降精度(本地时区,超5天不渲染
   // 非法时间戳 → null
   assert.equal(renderMemoryTimestamp('not-a-date', now), null)
   // 注入块:5 天内带 (时间戳) 前缀,超 5 天不带
-  const fresh = buildInjectedBlock([{ content: '新记忆', timestamp: mkIso(1) }], null)
+  // (必须传 now:渲染按真实当前时间算龄,不注入固定时间会让测试随时间漂移变红)
+  const fresh = buildInjectedBlock([{ content: '新记忆', timestamp: mkIso(1) }], null, undefined, now)
   assert.ok(/- \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}\) 新记忆/.test(fresh))
-  const old = buildInjectedBlock([{ content: '旧记忆', timestamp: mkIso(240) }], null)
+  const old = buildInjectedBlock([{ content: '旧记忆', timestamp: mkIso(240) }], null, undefined, now)
   assert.ok(/- 旧记忆/.test(old) && !/旧记忆.*\(/.test(old))
 })
 
@@ -173,6 +174,16 @@ function fakeStorage(initial = {}) {
   }
 }
 
+// 慢写盘 storage:set 延迟 delayMs,放大「读-改-写」之间的竞态窗口(30ms 非魔法数字,只为暴露窗口)
+function fakeSlowStorage(delayMs, initial = {}) {
+  const store = { ...initial }
+  return {
+    get: async (key) => ({ [key]: store[key] }),
+    set: async (obj) => { await new Promise((r) => setTimeout(r, delayMs)); Object.assign(store, obj) },
+    _store: store,
+  }
+}
+
 test('queue:成功 flush 清空队列 + 保序', async () => {
   const storage = fakeStorage()
   const sent = []
@@ -229,4 +240,37 @@ test('queue:恢复后补发 + token 头', async () => {
   await new Promise((r) => setTimeout(r, 20))
   assert.equal(await q.pendingCount(), 0)
   assert.ok(headers.some((h) => h['X-Ecolink-Token'] === 'sekrit'))
+})
+
+test('queue:并发 push 不丢条目(缺陷 1 回归:入队非原子读-改-写)', async () => {
+  const storage = fakeStorage()
+  const q = createOfflineQueue({ storage, fetchImpl: async () => { throw new Error('down') },
+                                 bridgeUrl: 'http://127.0.0.1:17520', maxRetries: 1, baseDelayMs: 1 })
+  // 关键:不 await 每个 push,三条并发(改前互相覆盖,只剩最后写入者的 1 条)
+  q.push({ kind: 'sync', payload: { memories: [{ content: 'A' }] } })
+  q.push({ kind: 'sync', payload: { memories: [{ content: 'B' }] } })
+  q.push({ kind: 'sync', payload: { memories: [{ content: 'C' }] } })
+  await new Promise((r) => setTimeout(r, 200))
+  assert.equal(await q.pendingCount(), 3)
+})
+
+test('queue:并发场景不丢条目、不越队(缺陷 1/2 回归:flush 互斥不覆盖读-裁-写)', async () => {
+  // storage.set 慢 30ms 制造窗口;B 永久失败 → 断言
+  //   ① A 只投递一次(无重复)  ② B、C 都还在队列里(不丢、不越队;改前队列被裁到 0)
+  const storage = fakeSlowStorage(30)
+  const sent = []
+  const q = createOfflineQueue({ storage, bridgeUrl: 'http://x/',
+    fetchImpl: async (url, init) => {
+      const id = JSON.parse(init.body).memories?.[0]?.content
+      if (id === 'B') throw new Error('B fails')
+      sent.push(id)
+      return { ok: true, json: async () => ({}) }
+    },
+    maxRetries: 1, baseDelayMs: 1 })
+  q.push({ kind: 'sync', payload: { memories: [{ content: 'A' }] } })
+  q.push({ kind: 'sync', payload: { memories: [{ content: 'B' }] } })
+  q.push({ kind: 'sync', payload: { memories: [{ content: 'C' }] } })
+  await new Promise((r) => setTimeout(r, 400))
+  assert.equal(sent.filter((s) => s === 'A').length, 1)          // 无重复投递
+  assert.equal(await q.pendingCount(), 2)                        // B、C 都还在
 })

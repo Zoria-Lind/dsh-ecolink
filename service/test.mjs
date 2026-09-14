@@ -141,6 +141,45 @@ test('pool:stale 过时记忆清单(压缩流程用)', async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('E3:快照/diff(新增/更新/删除,覆盖共享池与会话池)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ecolink-snap-'))
+  const pool = createPool({ dir })
+  await pool.sync({ memories: [{ content: '甲', key: 'k_a' }, { content: '乙' }] })
+  await pool.sync({ session_id: 'sess-s', memories: [{ content: '会话甲' }] })
+  const hash1 = await pool.snapshotNow()
+  assert.equal(typeof hash1, 'string')
+  assert.equal(hash1.length, 64)
+
+  // 新增 + 更新(key 覆盖)+ 会话池新增 → added/updated
+  await pool.sync({ memories: [{ content: '丙' }, { key: 'k_a', content: '甲(改)' }] })
+  await pool.sync({ session_id: 'sess-s', memories: [{ content: '会话乙' }] })
+  const d = pool.diffSince(hash1)
+  assert.equal(d.ok, true)
+  assert.equal(d.current.length, 64)
+  assert.equal(d.added.length, 2) // 丙 + sess-s:会话乙
+  assert.equal(d.updated.length, 1) // k_a 覆盖(时间戳+内容变)
+  assert.equal(d.removed.length, 0)
+
+  // 删除 → removed
+  const del = await pool.deleteMemories({ keys: ['k_a'] })
+  assert.equal(del.deleted, 1)
+  const d2 = pool.diffSince(hash1)
+  assert.equal(d2.removed.length, 1)
+
+  // 二次快照后 since=latest 无差异;清单与 latest 指向
+  await pool.snapshotNow()
+  const d3 = pool.diffSince('latest')
+  assert.equal(d3.added.length + d3.removed.length + d3.updated.length, 0)
+  const list = pool.listSnapshots()
+  assert.equal(list.ok, true)
+  assert.equal(list.snapshots.length, 2)
+  assert.equal(list.latest, list.snapshots[0].hash) // 按 mtime 倒序,最新在前
+
+  // 未知快照 → null(走 HTTP 404)
+  assert.equal(pool.diffSince('f'.repeat(64)), null)
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('pool:归档(超过保留期且未访问的非 pinned)→ archive.json;persist 重启恢复', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ecolink-arch-'))
   const pool = createPool({ dir, retentionDays: 0 }) // 0 天:立即过期
@@ -161,6 +200,9 @@ test('pool:归档(超过保留期且未访问的非 pinned)→ archive.json;pers
 })
 
 // ---- HTTP 层(子进程起真实服务,env 注入临时端口与目录) ----
+// E8 后鉴权默认开启:测试子进程必须显式注入 env token(否则服务会生成随机 token
+// 并写回生产 config.json);以下所有请求都带 X-Ecolink-Token
+const TEST_TOKEN = 'test-token'
 let child
 let base
 let port
@@ -169,14 +211,15 @@ before(async () => {
   poolDir = mkdtempSync(join(tmpdir(), 'ecolink-http-'))
   port = 20000 + Math.floor(Math.random() * 20000)
   child = spawn(process.execPath, [join(import.meta.dirname, 'server.mjs')], {
-    env: { ...process.env, ECOLLINK_PORT: String(port), ECOLLINK_POOL_DIR: poolDir },
+    // E5:主子进程显式开 autoConfirm → 保持"直入池"旧语义的既有断言;建议队列分支另起子进程测
+    env: { ...process.env, ECOLLINK_PORT: String(port), ECOLLINK_POOL_DIR: poolDir, ECOLLINK_TOKEN: TEST_TOKEN, ECOLLINK_AUTO_CONFIRM: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   base = `http://127.0.0.1:${port}`
-  // 等就绪:轮询 status 最多 5 秒
+  // 等就绪:轮询 status 最多 5 秒(带 token;E8 后无 token 一律 401)
   for (let i = 0; i < 50; i++) {
     try {
-      const resp = await fetch(`${base}/memory/status`)
+      const resp = await fetch(`${base}/memory/status`, { headers: { 'X-Ecolink-Token': TEST_TOKEN } })
       if (resp.ok) return
     } catch { /* 未就绪 */ }
     await new Promise((r) => setTimeout(r, 100))
@@ -189,61 +232,239 @@ after(() => {
 })
 
 test('HTTP:sync/pool/recent/session/status/touch 全端点 + CORS', async () => {
+  const AUTH = { 'X-Ecolink-Token': TEST_TOKEN }
+  // E8:无 token 一律 401(默认安全)
+  const denied = await fetch(`${base}/memory/status`)
+  assert.equal(denied.status, 401)
+
   // sync 到共享池
   const s1 = await fetch(`${base}/memory/sync`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
     body: JSON.stringify({ memories: [{ content: 'http 共享记忆' }] }),
   })
   assert.equal(s1.status, 200)
   assert.equal((await s1.json()).added, 1)
 
-  // CORS 头存在(content script 跨源)
-  assert.equal(s1.headers.get('access-control-allow-origin'), '*')
+  // CORS 头存在且收窄到页面 origin(E8:不再通配;content script 以页面 origin 发 fetch)
+  assert.equal(s1.headers.get('access-control-allow-origin'), 'https://chat.deepseek.com')
 
-  // OPTIONS 预检
+  // OPTIONS 预检(不鉴权)
   const opt = await fetch(`${base}/memory/sync`, { method: 'OPTIONS' })
   assert.equal(opt.status, 204)
 
   // sync 到会话池 + 命名
   await fetch(`${base}/memory/sync`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: 'http-sess', memories: [{ content: 'http 会话记忆' }] }),
   })
   await fetch(`${base}/memory/session`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: 'http-sess', name: '测试会话' }),
   })
 
   // pool 全量
-  const poolResp = await fetch(`${base}/memory/pool`)
+  const poolResp = await fetch(`${base}/memory/pool`, { headers: AUTH })
   const pool = await poolResp.json()
   assert.equal(pool.shared_pool.length, 1)
   assert.equal(pool.session_pools['http-sess'].identity, '测试会话')
 
   // session/{id}
-  const spResp = await fetch(`${base}/memory/session/http-sess`)
+  const spResp = await fetch(`${base}/memory/session/http-sess`, { headers: AUTH })
   assert.equal((await spResp.json()).memories.length, 1)
-  const nf = await fetch(`${base}/memory/session/nope`)
+  const nf = await fetch(`${base}/memory/session/nope`, { headers: AUTH })
   assert.equal(nf.status, 404)
 
   // recent
-  const rec = await fetch(`${base}/memory/recent?n=1`)
+  const rec = await fetch(`${base}/memory/recent?n=1`, { headers: AUTH })
   assert.equal((await rec.json()).memories.length, 1)
 
   // status
-  const st = await fetch(`${base}/memory/status`)
+  const st = await fetch(`${base}/memory/status`, { headers: AUTH })
   assert.equal((await st.json()).shared, 1)
 
   // touch
   const t = await fetch(`${base}/memory/touch`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids: [pool.shared_pool[0].id] }),
   })
   assert.equal((await t.json()).touched, 1)
 
+  // 错 token 也 401
+  const wrong = await fetch(`${base}/memory/status`, { headers: { 'X-Ecolink-Token': 'wrong' } })
+  assert.equal(wrong.status, 401)
+
   // 未知路径 404
-  const nf2 = await fetch(`${base}/memory/nope`)
+  const nf2 = await fetch(`${base}/memory/nope`, { headers: AUTH })
   assert.equal(nf2.status, 404)
+})
+
+test('HTTP:快照/diff/快照清单(E3)', async () => {
+  const AUTH = { 'X-Ecolink-Token': TEST_TOKEN }
+  const snap = await fetch(`${base}/memory/snapshot`, { method: 'POST', headers: AUTH })
+  assert.equal(snap.status, 200)
+  const { hash } = await snap.json()
+  assert.equal(typeof hash, 'string')
+  assert.equal(hash.length, 64)
+
+  // 变更池 → diff 能看到新增
+  await fetch(`${base}/memory/sync`, {
+    method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ memories: [{ content: 'diff 探针条目' }] }),
+  })
+  const diff = await fetch(`${base}/memory/diff?since=${hash}`, { headers: AUTH })
+  assert.equal(diff.status, 200)
+  const dj = await diff.json()
+  assert.ok(dj.ok)
+  assert.ok(dj.added.length >= 1)
+
+  // 清单 + latest 指向
+  const list = await fetch(`${base}/memory/snapshots`, { headers: AUTH })
+  assert.equal(list.status, 200)
+  const lj = await list.json()
+  assert.ok(lj.ok)
+  assert.equal(lj.latest, hash)
+  assert.ok(lj.snapshots.some((s) => s.hash === hash))
+
+  // 未知快照 → 404
+  const nf = await fetch(`${base}/memory/diff?since=${'f'.repeat(64)}`, { headers: AUTH })
+  assert.equal(nf.status, 404)
+})
+
+test('E5:建议确认队列(队列分支=显式 ECOLLINK_AUTO_CONFIRM=0;确认后入池;拒绝移除;未确认不进池)', async () => {
+  // 独立子进程:显式 ECOLLINK_AUTO_CONFIRM='0' → sync 进建议队列。
+  // (2026-09-14 设计纠正:生产默认 autoConfirm=true 直入池,队列代码保留、显式关断才走。
+  //  教训:子进程会读到真实 config.json,不固定 env 就会被用户配置污染——曾因此
+  //  E5 断言失败 + sugChild 没被杀 → 孤儿进程吊死整个套件,故下面必须 try/finally)
+  const dir = mkdtempSync(join(tmpdir(), 'ecolink-sug-'))
+  const sugPort = 20000 + Math.floor(Math.random() * 20000)
+  const sugChild = spawn(process.execPath, [join(import.meta.dirname, 'server.mjs')], {
+    env: { ...process.env, ECOLLINK_PORT: String(sugPort), ECOLLINK_POOL_DIR: dir, ECOLLINK_TOKEN: TEST_TOKEN, ECOLLINK_AUTO_CONFIRM: '0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  try {
+    const sugBase = `http://127.0.0.1:${sugPort}`
+    const AUTH = { 'X-Ecolink-Token': TEST_TOKEN }
+    for (let i = 0; i < 50; i++) {
+      try {
+        const resp = await fetch(`${sugBase}/memory/status`, { headers: AUTH })
+        if (resp.ok) break
+      } catch { /* 未就绪 */ }
+      await new Promise((r) => setTimeout(r, 100))
+    }
+
+    // sync(队列模式)→ queued:1,added:0(F1 形状保留);/memory/pool 看不到
+    const s1 = await fetch(`${sugBase}/memory/sync`, {
+      method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memories: [{ content: '建议条目甲' }] }),
+    })
+    assert.equal(s1.status, 200)
+    const r1 = await s1.json()
+    assert.equal(r1.ok, true)
+    assert.equal(r1.added, 0)
+    assert.equal(r1.queued, 1)
+    const poolView1 = await (await fetch(`${sugBase}/memory/pool`, { headers: AUTH })).json()
+    assert.equal(poolView1.shared_pool.length, 0) // 未确认绝不入池
+
+    // 列表可见;显式 /memory/suggest 同样进队列
+    const sug2 = await fetch(`${sugBase}/memory/suggest`, {
+      method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memories: [{ content: '建议条目乙' }] }),
+    })
+    assert.equal((await sug2.json()).queued, 1)
+    const listResp = await fetch(`${sugBase}/memory/suggestions`, { headers: AUTH })
+    const list = await listResp.json()
+    assert.equal(list.suggestions.length, 2)
+    const idA = list.suggestions.find((s) => s.content === '建议条目甲')?.id
+    const idB = list.suggestions.find((s) => s.content === '建议条目乙')?.id
+    assert.ok(idA && idB)
+
+    // 确认甲 → 入池 + 队列减一
+    const conf = await fetch(`${sugBase}/memory/suggest/confirm`, {
+      method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: idA }),
+    })
+    const cr = await conf.json()
+    assert.equal(cr.confirmed, 1)
+    assert.equal(cr.added, 1)
+    const poolView2 = await (await fetch(`${sugBase}/memory/pool`, { headers: AUTH })).json()
+    assert.equal(poolView2.shared_pool.length, 1)
+    assert.equal(poolView2.shared_pool[0].content, '建议条目甲')
+
+    // 拒绝乙 → 直接丢弃
+    const rej = await fetch(`${sugBase}/memory/suggest/reject`, {
+      method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: idB }),
+    })
+    assert.equal((await rej.json()).rejected, 1)
+    const list2 = await (await fetch(`${sugBase}/memory/suggestions`, { headers: AUTH })).json()
+    assert.equal(list2.suggestions.length, 0)
+
+    // 不存在的 id:confirm/reject 幂等不抛
+    const confMiss = await fetch(`${sugBase}/memory/suggest/confirm`, {
+      method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'nope' }),
+    })
+    assert.equal((await confMiss.json()).confirmed, 0)
+
+    // 请求体 confirm:true = 逐请求直入(压缩闭环/手动保存用,绕过建议队列)
+    const cDirect = await fetch(`${sugBase}/memory/sync`, {
+      method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, memories: [{ content: '显式直入条目' }] }),
+    })
+    const rDirect = await cDirect.json()
+    assert.equal(rDirect.added, 1)
+    assert.equal(rDirect.queued, 0)
+    const poolView3 = await (await fetch(`${sugBase}/memory/pool`, { headers: AUTH })).json()
+    assert.equal(poolView3.shared_pool.length, 2) // 确认的甲 + 直入条目
+
+    // 持久化:suggestions.json 落盘、重启(新 pool 实例)后队列还在
+    await fetch(`${sugBase}/memory/suggest`, {
+      method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memories: [{ content: '重启前的建议' }] }),
+    })
+    sugChild.kill()
+    const { createPool } = await import('./pool.mjs')
+    const pool2 = createPool({ dir })
+    assert.equal(pool2.listSuggestions().suggestions.length, 1)
+  } finally {
+    // 断言失败也必须杀子进程,否则孤儿进程带开 stdio 管道会把整个套件吊死(2026-09-14 事故)
+    try { sugChild.kill() } catch { /* noop */ }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('E7:黑名单拦截(sync/建议/确认/DSM 导入,落盘前拒收)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ecolink-bl-'))
+  const pool = createPool({ dir, blacklist: ['机密', 'PASSWORD'] })
+
+  // sync:命中的拒收(blocked 计数),干净条目正常入库
+  const r1 = await pool.sync({ memories: [{ content: '包含机密文件的内容' }, { content: '正常记忆' }] })
+  assert.equal(r1.added, 1)
+  assert.equal(r1.blocked, 1)
+  assert.equal(pool.pool().shared_pool.length, 1)
+
+  // 大小写不敏感
+  const r2 = await pool.sync({ memories: [{ content: 'my password is 123' }] })
+  assert.equal(r2.added, 0)
+  assert.equal(r2.blocked, 1)
+
+  // 建议队列同样拦截
+  const r3 = await pool.suggest({ memories: [{ content: '机密事项' }, { content: '干净事项' }] })
+  assert.equal(r3.queued, 1)
+  assert.equal(r3.blocked, 1)
+
+  // 确认干净建议正常入池
+  const id = pool.listSuggestions().suggestions[0]?.id
+  const r4 = await pool.confirmSuggestion({ id })
+  assert.equal(r4.added, 1)
+  assert.equal(r4.blocked, 0)
+
+  // DSM 导入同样拦截
+  const r5 = await pool.importDsm([{ key: 'k', value: '机密值' }, { key: 'k2', value: '干净值' }])
+  assert.equal(r5.added, 1)
+  assert.equal(r5.blocked, 1)
+
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('HTTP:token 鉴权(env 注入 token 时无头拒绝)', async () => {
@@ -267,4 +488,48 @@ test('HTTP:token 鉴权(env 注入 token 时无头拒绝)', async () => {
   assert.equal(allowed.status, 200)
   authChild.kill()
   rmSync(authDir, { recursive: true, force: true })
+})
+
+// E8-fix 回归:token 发现端点。扩展侧拿不到本地 config.json,必须能自动取回 token;
+// 同时必须挡住"从别的网站发起"的读取。注意:简单跨源请求【不带】Origin → 403,
+// 这正是防线所在,所以要分别断言"无 Origin 403"与"带页面 Origin 200"。
+test('HTTP:token 发现端点(仅 chat.deepseek.com origin 可读)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ecolink-tok-'))
+  const port = 20000 + Math.floor(Math.random() * 20000)
+  const child = spawn(process.execPath, [join(import.meta.dirname, 'server.mjs')], {
+    env: { ...process.env, ECOLLINK_PORT: String(port), ECOLLINK_POOL_DIR: dir, ECOLLINK_TOKEN: 'discover-me' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const base = `http://127.0.0.1:${port}`
+  for (let i = 0; i < 50; i++) {
+    try {
+      const resp = await fetch(`${base}/memory/status`, { headers: { 'X-Ecolink-Token': 'discover-me' } })
+      if (resp.ok) break
+    } catch { /* 未就绪 */ }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+
+  // 预检必须放行(否则浏览器连取 token 的请求都发不出去)
+  const opt = await fetch(`${base}/memory/token`, { method: 'OPTIONS' })
+  assert.equal(opt.status, 204)
+
+  // 无 Origin(= 别的网站的简单跨源请求)→ 拒绝
+  const noOrigin = await fetch(`${base}/memory/token`)
+  assert.equal(noOrigin.status, 403)
+
+  // 伪造 origin → 拒绝
+  const forged = await fetch(`${base}/memory/token`, { headers: { Origin: 'https://evil.example' } })
+  assert.equal(forged.status, 403)
+
+  // 正确的页面 origin → 放行并给出 token
+  const ok = await fetch(`${base}/memory/token`, { headers: { Origin: 'https://chat.deepseek.com' } })
+  assert.equal(ok.status, 200)
+  assert.equal((await ok.json()).token, 'discover-me')
+
+  // 该端点不得顺带泄漏别的数据
+  const body = await (await fetch(`${base}/memory/token`, { headers: { Origin: 'https://chat.deepseek.com' } })).text()
+  assert.ok(!body.includes('shared_pool') && !body.includes('session_pools'))
+
+  child.kill()
+  rmSync(dir, { recursive: true, force: true })
 })

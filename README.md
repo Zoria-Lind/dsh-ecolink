@@ -13,7 +13,9 @@
 ## 快速开始
 
 ```bash
-# 1. 启动服务(记忆池唯一写者)
+# 1. 启动服务(记忆池唯一写者)——日常不需要手动起:
+#    DSH 的 adapter 会自动拉起(serviceAutoStart 默认开);
+#    登录自启任务兜底:scripts/install-autostart.ps1(不开 DSH 也能用)
 node dsh-ecolink/service/server.mjs
 
 # 2. 加载扩展
@@ -24,6 +26,7 @@ dsh plugin --profile web add D:/dsh/dsh-plugins/dsh-ecolink/adapter
 ```
 
 服务默认 `http://127.0.0.1:17520`,零外部网络请求、零遥测;记忆数据只落在本机。
+运维脚本:scripts/start-service.ps1(隐藏启动)/ stop-service.ps1(停止)/ install-autostart.ps1 / uninstall-autostart.ps1(登录自启)。
 
 ## 记忆流动
 
@@ -44,9 +47,9 @@ DSH 会话 ──pre-step 注入(同选择器)──◀────────�
 ## 测试
 
 ```bash
-node --test extension/test/core.test.mjs   # 扩展核心 11 项
-node --test service/test.mjs               # 服务 7 项
-node adapter/test/smoke.mjs                # 适配层 8 项
+node --test extension/test/core.test.mjs   # 扩展核心 14 项
+node --test service/test.mjs               # 服务 12 项
+node adapter/test/smoke.mjs                # 适配层 66 项
 ```
 
 ## 文档
