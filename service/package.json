@@ -1,6 +1,6 @@
 {
   "name": "@zoria-lind/dsh-ecolink-service",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "dsh-ecolink 本地记忆服务:网页扩展与 DSH 共享记忆池的唯一写者(零依赖、127.0.0.1、token 鉴权)",
   "license": "MIT",
   "type": "module",
@@ -14,6 +14,7 @@
   "files": [
     "server.mjs",
     "pool.mjs",
+    "compress.mjs",
     "config.example.json",
     "README.md",
     "LICENSE"

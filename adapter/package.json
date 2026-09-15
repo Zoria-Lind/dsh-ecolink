@@ -1,6 +1,6 @@
 {
   "name": "@zoria-lind/dsh-ecolink-adapter",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "dsh-ecolink DSH 适配层:直读本地记忆池、pre-step 注入(打分+预算+会话去重)、#记忆名 过滤,打通网页端记忆生态",
   "license": "MIT",
   "type": "module",
@@ -10,6 +10,8 @@
   },
   "files": [
     "src",
+    "extension/core",
+    "service",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
