@@ -5,3 +5,4 @@ service/config.json
 
 .publish-adapter/
 .publish-service/
+*.tgz
