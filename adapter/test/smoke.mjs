@@ -9,7 +9,7 @@ import { resolveConfig } from '../src/config.js'
 import { createMemoryInjectModule } from '../src/modules/memoryInject.js'
 import { createMemoryWriteModule } from '../src/modules/memoryWrite.js'
 import { createMemoryDiffModule } from '../src/modules/memoryDiff.js'
-import { createServiceGuardModule, shouldAutoStart, isLocalServiceUrl } from '../src/modules/serviceGuard.js'
+import { createServiceGuardModule, shouldAutoStart, isLocalServiceUrl, SERVICE_SERVER_CANDIDATES } from '../src/modules/serviceGuard.js'
 import { apply } from '../src/index.js'
 
 let failures = 0
@@ -287,6 +287,7 @@ console.log('== 服务自动拉起(v1.1)==')
 {
   check('isLocalServiceUrl 本地判真', isLocalServiceUrl('http://127.0.0.1:17520') && isLocalServiceUrl('http://localhost:9999'))
   check('isLocalServiceUrl 远程判假', !isLocalServiceUrl('http://192.168.1.5:17520') && !isLocalServiceUrl('not-a-url'))
+  check('候选路径含同仓 service 布局(0.1.1 起 + npm 包候选)', SERVICE_SERVER_CANDIDATES.length >= 2 && SERVICE_SERVER_CANDIDATES.some((p) => p.endsWith('service/server.mjs') || p.endsWith('service\\server.mjs')))
   const baseCfg = { ...resolveConfig({}).adapter }
   check('shouldAutoStart 默认真', shouldAutoStart(baseCfg) === true)
   check('shouldAutoStart 关掉后假', shouldAutoStart({ ...baseCfg, serviceAutoStart: false }) === false)

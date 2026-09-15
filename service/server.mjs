@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // dsh-ecolink-service:本地记忆池唯一写者(PLAN.md §3.3 / §7)。
 // 浏览器扩展与 popup 经 localhost POST 推送/查询;DSH 适配层只读文件不连服务。
 // 设计:零依赖(node:http)、只绑 127.0.0.1、强制共享 token(E8:为空时启动自动生成,

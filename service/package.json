@@ -1,0 +1,36 @@
+{
+  "name": "@zoria-lind/dsh-ecolink-service",
+  "version": "0.1.1",
+  "description": "dsh-ecolink 本地记忆服务:网页扩展与 DSH 共享记忆池的唯一写者(零依赖、127.0.0.1、token 鉴权)",
+  "license": "MIT",
+  "type": "module",
+  "main": "server.mjs",
+  "exports": {
+    ".": "./server.mjs"
+  },
+  "bin": {
+    "ecolink-service": "server.mjs"
+  },
+  "files": [
+    "server.mjs",
+    "pool.mjs",
+    "config.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zoria-Lind/dsh-ecolink.git",
+    "directory": "service"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "memory",
+    "ecolink",
+    "local-service"
+  ]
+}

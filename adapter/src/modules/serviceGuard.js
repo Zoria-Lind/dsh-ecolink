@@ -13,11 +13,20 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 // 同仓 service 目录(与 memoryWrite 的 SERVICE_CONFIG 同源;独立发布包无此目录 → 跳过拉起)。
-// 两种布局都找:开发挂载(adapter 上一级的 service/)+ 独立发布包(adapter 内 service/,通常不存在)
+// 三种布局都找:①npm 安装的 @zoria-lind/dsh-ecolink-service 包(尽力而为解析,不写死依赖)
+// ②开发挂载(adapter 上一级的 service/)③独立发布包(adapter 内 service/,通常不存在)
 const HERE = dirname(fileURLToPath(import.meta.url))
+const NPM_SERVICE_PATH = (() => {
+  try {
+    const req = createRequire(import.meta.url)
+    return join(dirname(req.resolve('@zoria-lind/dsh-ecolink-service/package.json')), 'server.mjs')
+  } catch { return null }
+})()
 export const SERVICE_SERVER_CANDIDATES = [
+  ...(NPM_SERVICE_PATH ? [NPM_SERVICE_PATH] : []),
   join(HERE, '../../../service/server.mjs'),
   join(HERE, '../../service/server.mjs'),
 ]
