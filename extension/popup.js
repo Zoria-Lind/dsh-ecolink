@@ -209,7 +209,8 @@ async function refreshCompress() {
   }
   $('compressStart').disabled = true
   $('compressFinish').disabled = false
-  $('compressStatus').textContent = `压缩进行中:旧记忆 ${st.oldCount} 条,已收到新标签 ${st.newCount ?? 0} 个 → 去开一个新对话发消息,模型会收到压缩指令`
+  const maxDup = Array.isArray(st.dupReports) && st.dupReports.length > 0 ? Math.max(...st.dupReports) : 0
+  $('compressStatus').textContent = `压缩进行中:旧记忆 ${st.oldCount} 条已移入暂存池(未验收可回滚),已收到新标签 ${st.newCount ?? 0} 个${maxDup > 0 ? `,模型自报重复 ${maxDup} 条` : ''} → 去开一个新对话发消息,模型会收到压缩指令`
 }
 
 $('compressStart').onclick = async () => {
@@ -222,7 +223,7 @@ $('compressStart').onclick = async () => {
 $('compressFinish').onclick = async () => {
   const r = await chrome.runtime.sendMessage({ kind: 'compress-finish' }).catch((err) => ({ error: String(err?.message ?? err) }))
   if (r?.error) { $('compressStatus').textContent = '结束失败: ' + r.error; return }
-  $('compressStatus').textContent = `压缩完成:删除未合并旧条目 ${r.deleted ?? 0} 条,保留 ${r.kept ?? 0} 条(已被新内容覆盖)`
+  $('compressStatus').textContent = `压缩验收通过:清除暂存 ${r.deleted ?? 0} 条,新标签已作为普通记忆入主池`
   refreshStatus()
   refreshCompress()
 }
@@ -236,11 +237,19 @@ $('compressApi').onclick = async () => {
     const resp = await bridgeFetch('/memory/compress', { method: 'POST', body: JSON.stringify({ days: cfg.compressMinAgeDays ?? 5 }) })
     const r = await resp.json()
     if (!r.ok) {
-      $('compressStatus').textContent = 'API 压缩失败: ' + (r.error ?? 'HTTP ' + resp.status)
+      $('compressStatus').textContent = 'API 压缩失败: ' + (r.error ?? 'HTTP ' + resp.status) + (r.rolledBack ? `(暂存已回滚 ${r.rolledBack} 条,记忆无损)` : '')
+    } else if (r.pendingConfirm) {
+      const okConfirm = confirm(`模型自报重复 ${r.reportedDup} 条(共 ${r.oldCount} 条),已输出 ${r.tagCount} 条新标签。\n确认提交压缩(清除暂存池)?\n取消 = 回滚,旧记忆原样放回主池。`)
+      const ep = okConfirm ? '/memory/compress-commit' : '/memory/compress-rollback'
+      const rr = await bridgeFetch(ep, { method: 'POST' }).then((x) => x.json()).catch(() => ({}))
+      $('compressStatus').textContent = okConfirm
+        ? `已确认:清除暂存 ${rr.committed ?? 0} 条`
+        : `已取消:暂存回滚 ${rr.restored ?? 0} 条,记忆无损`
+      refreshStatus()
     } else if (!r.oldCount) {
       $('compressStatus').textContent = '没有旧记忆可压缩'
     } else {
-      $('compressStatus').textContent = `API 压缩完成:处理 ${r.oldCount} 条旧记忆,新增 ${r.added} 条,删除 ${r.deleted} 条`
+      $('compressStatus').textContent = `API 压缩完成:处理 ${r.oldCount} 条旧记忆,新增 ${r.added} 条,清除暂存 ${r.deleted} 条`
       refreshStatus()
     }
   } catch (err) {

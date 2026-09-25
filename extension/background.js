@@ -17,7 +17,7 @@ getConfig().then((c) => { bgDebug = !!c.debug }).catch(() => {})
 const blog = (...a) => { if (bgDebug) console.log(...a) }
 
 // 压缩指令的同步副本(inject.js 内联版为准;用于背景层拒绝"指令回显"垃圾)
-const COMPRESS_INSTRUCTION_BG = '记忆压缩任务。下面是记忆池里的旧记忆,请逐条阅读后压缩合并:去掉重复条目,内容相近的合并成一条,保留日期、数字和专有名词。压缩完成后:先写一句简短说明(如"压缩完成"),然后紧接着在说明文字之后、同一行内,用空格分隔地输出全部标签。每条标签的写法(必须完全一致):以 <DSM:memory_write> 开头,紧接着写该条内容,以 </DSM:memory_write> 结尾。重要:标签必须跟在说明后面同行,禁止独占一行,禁止用代码块——独占一行的标签会被页面过滤掉,导致记忆无法保存。输出前逐条核对原文,确保没有遗漏和编造。'
+const COMPRESS_INSTRUCTION_BG = '记忆压缩任务。下面是记忆池里的旧记忆清单,每行格式:方括号内是该条的 key(英文标识),冒号后是内容。请逐条阅读后压缩合并:只合并内容明显重复或高度重叠的条目,不同主题必须各自保留、分别输出标签,任何旧记忆的信息都不得丢弃;宁可多输出几条也禁止过度合并。压缩完成后:先写一句说明,格式为 压缩完成(重复 N 条)——N 是你统计出的清单里内容完全重复或高度重叠、应直接合并或去掉的条数。验收规则(服务会严格按此验收,不满足则整批作废、旧记忆原样恢复):标签数量必须不少于"(清单总数 − N) × 三分之二"与"清单总数 × 十分之一"两者中的较大值;输出完标签后自己数一遍数量,不够就继续补齐。然后紧接着在说明文字之后、同一行内,用空格分隔地输出全部标签。每条标签必须写成完整属性形式:<DSM:memory_write key="snake_case_key" importance="always">事实内容</DSM:memory_write>。key 规则:内容未变的条目必须沿用清单里方括号中的原 key;只有合并或改写时才生成新 key(小写单词用下划线连接)。importance 按重要性写 always 或 called。重要:标签必须跟在说明后面同行,禁止独占一行,禁止用代码块——独占一行的标签会被页面过滤掉,导致记忆无法保存;即使标签很多也必须全部输出,禁止省略。输出前逐条核对原文,确保没有遗漏和编造。'
 
 // ---- 压缩状态机(PLAN §4.4 v3:开始→旧清单快照→注入指令→收割新key→结束比对删除) ----
 async function getCompressState() {
@@ -117,17 +117,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         case 'compress-start': {
           const cfg = await getConfig()
           const headers = cfg.token ? { 'X-Ecolink-Token': cfg.token } : {}
-          const resp = await fetch(`${cfg.bridgeUrl.replace(/\/$/, '')}/memory/stale?days=${cfg.compressMinAgeDays ?? 5}`, { headers })
-          if (!resp.ok) { sendResponse({ ok: false, error: 'stale 请求失败 HTTP ' + resp.status }); return }
+          // 2026-09-25 事务:开始=旧记忆移入暂存池(主池清空该批,可随时回滚)
+          const resp = await fetch(`${cfg.bridgeUrl.replace(/\/$/, '')}/memory/compress-stage`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify({ days: cfg.compressMinAgeDays ?? 5 }),
+          })
+          if (!resp.ok) { sendResponse({ ok: false, error: '暂存失败 HTTP ' + resp.status }); return }
           const data = await resp.json()
-          if (!data.count) { sendResponse({ ok: true, oldCount: 0 }); return }
+          if (!data.oldCount) { sendResponse({ ok: true, oldCount: 0 }); return }
           const st = await setCompressState({
             active: true,
-            oldCount: data.count,
-            oldItems: data.stale.map((s) => ({ id: s.id, key: s.key ?? null, content: s.content, session_id: s.session_id ?? null })),
+            oldCount: data.oldCount,
+            oldItems: (data.staged ?? []).map((s) => ({ id: s.id, key: s.key ?? null, content: s.content, session_id: s.session_id ?? null })),
             newCount: 0,
             sessions: [], // 仅"收到压缩指令块"的会话,其收割才计入 newCount(防其他对话收割误计数→误删)
             newContents: [], // 压缩会话新标签的内容清单(结束保险:必须确实入池才允许删除)
+            newMemories: [], // 2026-09-25:完整标签(delete-then-write 的"写"侧数据)
+            dupReports: [], // 2026-09-25:模型自报的重复条数(动态下限用,取各轮最大值)
           })
           blog('[ecolink:bg] 压缩开始: ' + data.count + ' 条旧记忆')
           sendResponse({ ok: true, oldCount: st.oldCount })
@@ -143,6 +149,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true })
           return
         }
+        case 'dup-report': {
+          // 2026-09-25:模型自报重复数独立上报(说明行可能不含标签,不随 harvest 走)
+          const cs2 = await getCompressState()
+          if (cs2.active === true && Number.isFinite(Number(msg.dup)) && Number(msg.dup) > 0) {
+            const sid = typeof msg.session_id === 'string' ? msg.session_id : ''
+            const sids = Array.isArray(cs2.sessions) ? cs2.sessions : []
+            if (sid && sids.includes(sid)) {
+              const dups = Array.isArray(cs2.dupReports) ? cs2.dupReports : []
+              await setCompressState({ ...cs2, dupReports: [...dups, Number(msg.dup)] })
+              blog('[ecolink:bg] 压缩会话自报重复 ' + msg.dup + ' 条')
+            }
+          }
+          sendResponse({ ok: true })
+          return
+        }
         case 'compress-status': {
           const st = await getCompressState()
           sendResponse({ ok: true, ...st })
@@ -151,46 +172,35 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         case 'compress-finish': {
           const st = await getCompressState()
           if (!st.active) { sendResponse({ ok: true, deleted: 0, kept: 0 }); return }
-          // 保险:压缩期间一个标签都没收到 = 模型没执行压缩 →
-          // 拒绝删除,防"压缩流程变成清空池子"事故(实测发生过)
-          if ((st.newCount ?? 0) === 0) {
-            await setCompressState({ active: false, lastResult: '上次压缩:未收到任何新标签,已跳过删除(防清空)' })
-            sendResponse({ ok: true, deleted: 0, kept: st.oldItems?.length ?? 0, skipped: true, reason: 'no-new-tags' })
-            return
-          }
           const cfg = await getConfig()
           const headers = cfg.token ? { 'X-Ecolink-Token': cfg.token } : {}
+          // 2026-09-25 事务:验收不过 = 回滚(暂存记忆原样放回主池,零丢失)
+          const rollback = async (why) => {
+            await fetch(`${cfg.bridgeUrl.replace(/\/$/, '')}/memory/compress-rollback`, { method: 'POST', headers: { ...headers } }).catch(() => {})
+            await setCompressState({ active: false, lastResult: `上次压缩:${why},暂存记忆已回滚到主池` })
+            sendResponse({ ok: true, deleted: 0, kept: st.oldItems?.length ?? 0, skipped: true, reason: why })
+          }
+          // 保险:压缩期间一个标签都没收到 = 模型没执行压缩 → 回滚
+          if ((st.newCount ?? 0) === 0) { await rollback('未收到任何新标签'); return }
+          // 保险3(2026-09-25 动态下限):模型自报重复数放宽下限——正确压缩会因重复合并
+          // 输出少于 2/3,固定下限会误杀;自报取各轮最大值,兜底 1/10(与服务端同公式)
+          const dupReport = Array.isArray(st.dupReports) && st.dupReports.length > 0 ? Math.max(...st.dupReports) : 0
+          const effDup = Math.min(dupReport, Math.max(1, (st.oldCount ?? 0) - 1))
+          const minTags = Math.max(Math.ceil(((st.oldCount ?? 0) - effDup) * 2 / 3), Math.ceil((st.oldCount ?? 0) / 10))
+          if ((st.newCount ?? 0) < minTags) { await rollback(`新标签过少(${st.newCount ?? 0}/${st.oldCount ?? 0},自报重复 ${dupReport}),疑似过度合并`); return }
+          // 保险2:新标签必须确实已入主池(暂存期间主池无旧条目,落地即同步成功)
           const poolResp = await fetch(`${cfg.bridgeUrl.replace(/\/$/, '')}/memory/pool`, { headers })
           const pool = await poolResp.json()
           const all = [...(pool.shared_pool ?? []), ...Object.values(pool.session_pools ?? {}).flatMap((sp) => sp.memories ?? [])]
-          // 保险2:压缩会话的新标签必须**确实已在池里**(收割→同步可能失败/还躺在离线队列)
-          // 才允许删旧。与保险1 双保险,防止"计数了但内容没落地"的二次清池。
           const poolContents = new Set(all.map((it) => it.content))
           const landed = Array.isArray(st.newContents) && st.newContents.length > 0 && st.newContents.some((c) => poolContents.has(c))
-          if (!landed) {
-            await setCompressState({ active: false, lastResult: '上次压缩:新标签未在池中落地,已跳过删除(防清空)' })
-            sendResponse({ ok: true, deleted: 0, kept: st.oldItems?.length ?? 0, skipped: true, reason: 'no-new-content-in-pool' })
-            return
-          }
-          const byId = new Map(all.map((it) => [it.id, it]))
-          // 只删"内容未变"的旧条目(未被压缩结果覆盖/合并掉的);
-          // 被同 key 覆盖过的条目内容已变 → 保留(新内容)
-          const toDelete = []
-          for (const old of st.oldItems ?? []) {
-            const cur = byId.get(old.id)
-            if (cur && cur.content === old.content) toDelete.push(old.id)
-          }
-          let deleted = 0
-          if (toDelete.length > 0) {
-            const delResp = await fetch(`${cfg.bridgeUrl.replace(/\/$/, '')}/memory/delete`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
-              body: JSON.stringify({ ids: toDelete }),
-            })
-            deleted = (await delResp.json())?.deleted ?? 0
-          }
-          await setCompressState({ active: false, lastResult: `上次压缩:删除 ${deleted} 条,保留 ${(st.oldItems?.length ?? 0) - deleted} 条` })
-          blog(`[ecolink:bg] 压缩完成:删 ${deleted} / 留 ${(st.oldItems?.length ?? 0) - deleted}`)
-          sendResponse({ ok: true, deleted, kept: (st.oldItems?.length ?? 0) - deleted })
+          if (!landed) { await rollback('新标签未在池中落地'); return }
+          // 验收通过 → commit:清除暂存池
+          const commitResp = await fetch(`${cfg.bridgeUrl.replace(/\/$/, '')}/memory/compress-commit`, { method: 'POST', headers: { ...headers } })
+          const cr = await commitResp.json().catch(() => ({ committed: 0 }))
+          await setCompressState({ active: false, lastResult: `上次压缩:验收通过,清除暂存 ${cr.committed ?? 0} 条` })
+          blog(`[ecolink:bg] 压缩验收通过:清暂存 ${cr.committed ?? 0} 条`)
+          sendResponse({ ok: true, deleted: cr.committed ?? 0, kept: 0 })
           return
         }
         case 'touch': {
@@ -243,7 +253,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             const sids = Array.isArray(cs.sessions) ? cs.sessions : []
             if (sid && sids.includes(sid) && real.length > 0) {
               const contents = Array.isArray(cs.newContents) ? cs.newContents : []
-              await setCompressState({ ...cs, newCount: (cs.newCount ?? 0) + real.length, newContents: [...contents, ...real.map((m) => m.content ?? '')] })
+              const mems = Array.isArray(cs.newMemories) ? cs.newMemories : []
+              const dups = Array.isArray(cs.dupReports) ? cs.dupReports : []
+              await setCompressState({
+                ...cs,
+                newCount: (cs.newCount ?? 0) + real.length,
+                newContents: [...contents, ...real.map((m) => m.content ?? '')],
+                newMemories: [...mems, ...real.map((m) => ({ content: m.content ?? '', key: m.key ?? null, importance: m.importance ?? 'called' }))],
+                dupReports: [...dups, Number(msg.dup_report) || 0],
+              })
             } else if (real.length > 0) {
               blog('[ecolink:bg] 压缩模式:忽略非压缩会话收割 ' + real.length + ' 条(sid=' + (sid || '无') + ')')
             }

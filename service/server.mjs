@@ -12,7 +12,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { createPool } from './pool.mjs'
-import { compressWithApi, applyCompression } from './compress.mjs'
+import { compressChunked } from './compress.mjs'
 
 // 请求日志:落盘到 <poolDir>/service.log,大小超 1MB 自动轮转——
 // 排障时可直接读文件定位断点,无需用户翻浏览器控制台
@@ -226,18 +226,51 @@ const server = createServer(async (req, res) => {
       // 0 是合法值(全部视为过时,测试用)——不能用 || 兜底(0 被当假值吞成 5,已是第三次犯)
       const daysParsed = Number(body.days)
       const days = Math.min(3650, Math.max(0, Number.isFinite(daysParsed) ? daysParsed : 5))
-      const oldItems = pool.stale(days)
+      // 事务(2026-09-25):先暂存(旧记忆完整落盘 staging.json,主池清空该批)→
+      // 成功后 commit(清暂存);任何失败 rollback(原样放回主池)。旧记忆永不失守。
+      const staging = await pool.stageStale(days)
+      const oldItems = staging.staged
       if (oldItems.length === 0) return send(res, 200, { ok: true, oldCount: 0, added: 0, deleted: 0 })
-      reqLog('POST', path, `API 压缩开始: ${oldItems.length} 条旧记忆`)
+      reqLog('POST', path, `API 压缩开始: ${oldItems.length} 条旧记忆(已入暂存池)`)
       try {
-        const memories = await compressWithApi({ apiKey: liveCfg.deepseekApiKey, oldItems })
-        const result = await applyCompression(pool, oldItems, memories)
-        reqLog('POST', path, `API 压缩完成: 新增 ${result.added}, 删除 ${result.deleted}`)
-        return send(res, 200, { ok: true, oldCount: oldItems.length, ...result })
+        const { memories, reportedDup } = await compressChunked({ apiKey: liveCfg.deepseekApiKey, oldItems })
+        const syncRes = await pool.sync({ memories })
+        // 2026-09-25:自报重复超过一半时,提交前人工确认(防模型夸大自报导致大比例删除;
+        // 未确认期间 staging 保留,用户可随时回滚)
+        if (reportedDup > oldItems.length / 2) {
+          reqLog('POST', path, `API 压缩待确认:自报重复 ${reportedDup}/${oldItems.length},新标签 ${memories.length} 条`)
+          return send(res, 200, { ok: true, oldCount: oldItems.length, added: syncRes.added, pendingConfirm: true, reportedDup, tagCount: memories.length })
+        }
+        const committed = await pool.commitStaging()
+        reqLog('POST', path, `API 压缩完成: 新增 ${syncRes.added}, 替换 ${syncRes.replaced}, 清除暂存 ${committed.committed}`)
+        return send(res, 200, { ok: true, oldCount: oldItems.length, added: syncRes.added, deleted: committed.committed })
       } catch (err) {
-        reqLog('POST', path, `API 压缩失败: ${err?.message ?? err}`)
-        return send(res, 502, { ok: false, error: String(err?.message ?? err) })
+        const rb = await pool.rollbackStaging()
+        reqLog('POST', path, `API 压缩失败: ${err?.message ?? err}(已回滚 ${rb.restored} 条)`)
+        return send(res, 502, { ok: false, error: String(err?.message ?? err), rolledBack: rb.restored })
       }
+    }
+    // ---- 压缩事务端点(网页流程:开始=暂存,完成=验收/回滚) ----
+    if (path === '/memory/compress-stage' && method === 'POST') {
+      const body = await readBody(req)
+      const daysParsed = Number(body.days)
+      const days = Math.min(3650, Math.max(0, Number.isFinite(daysParsed) ? daysParsed : 5))
+      const staging = await pool.stageStale(days)
+      reqLog('POST', path, `暂存 ${staging.staged.length} 条旧记忆`)
+      return send(res, 200, { ok: true, oldCount: staging.staged.length, staged: staging.staged })
+    }
+    if (path === '/memory/compress-commit' && method === 'POST') {
+      const r = await pool.commitStaging()
+      reqLog('POST', path, `验收通过:清除暂存 ${r.committed} 条`)
+      return send(res, 200, { ok: true, ...r })
+    }
+    if (path === '/memory/compress-rollback' && method === 'POST') {
+      const r = await pool.rollbackStaging()
+      reqLog('POST', path, `验收未过:暂存已回滚,放回 ${r.restored} 条`)
+      return send(res, 200, { ok: true, ...r })
+    }
+    if (path === '/memory/compress-status' && method === 'GET') {
+      return send(res, 200, { ok: true, staging: pool.stagingStatus() })
     }
     // ---- GET ----
     if (path === '/memory/pool' && method === 'GET') {

@@ -99,6 +99,7 @@ export function createPool(options = {}) {
   const archiveFile = join(dir, 'archive.json')
   const snapDir = join(dir, 'snapshots') // E3 快照目录:<hash>.json + latest.json
   const sugFile = join(dir, 'suggestions.json') // E5 建议确认队列(独立文件,不进 memory.json → 适配层读不到未确认条目)
+  const stagingFile = join(dir, 'staging.json') // 2026-09-25:压缩暂存池(事务:stage→commit/rollback)
   let state = null
   let sugState = null
   let queue = Promise.resolve() // 变更串行化
@@ -223,6 +224,14 @@ export function createPool(options = {}) {
     return null
   }
 
+  // 把暂存条目原样放回所属池(回滚用;保留原始 id/key/content/timestamp;会话池已消失则入共享池)
+  function restoreEntry(it) {
+    const sid = typeof it.session_id === 'string' && it.session_id.length > 0 ? it.session_id : null
+    const { session_id, identity, ...rest } = it
+    if (sid && state.session_pools[sid]) state.session_pools[sid].memories.push(rest)
+    else state.shared_pool.push(rest)
+  }
+
   // 条目入库的核心循环(sync 与建议确认共用):key 化 upsert + 无 key 内容去重 + replace
   function addMemoriesToState(payload) {
     const memories = Array.isArray(payload?.memories) ? payload.memories : []
@@ -230,6 +239,7 @@ export function createPool(options = {}) {
     let added = 0
     let replaced = 0
     let blocked = 0
+    let deduped = 0
     for (const m of memories) {
       if (typeof m?.content !== 'string' || m.content.trim().length === 0) continue
       // E7 黑名单:落盘前拦截(覆盖 sync / 建议确认 / compress 经 sync 的写入)
@@ -262,6 +272,15 @@ export function createPool(options = {}) {
           continue
         }
       }
+      // 2026-09-25:全池内容去重——模型在压缩/内容注入场景会用新 key 重吐旧内容,
+      // 旧逻辑只在同 key/无 key 路径去重,导致重复条目暴涨(实测 242→388)。
+      // 不同 key 但内容与池中任意条目完全一致 → 跳过(内容即事实,重复即垃圾)。
+      // 压缩完成流程是"先删后写",被跳过的标签在删除后会由调用方重新写入,不丢内容。
+      {
+        const trimmed = m.content.trim()
+        const allPools = [...state.shared_pool, ...Object.values(state.session_pools ?? {}).flatMap((sp) => sp.memories ?? [])]
+        if (allPools.some((it) => it.content === trimmed)) { deduped += 1; continue }
+      }
       // 无 key 条目按内容去重:相同内容已存在则跳过
       // (模型回显示例会同一内容反复吐,池层是最后一道闸)
       if (!key) {
@@ -286,7 +305,7 @@ export function createPool(options = {}) {
       }
       added += 1
     }
-    return { added, replaced, blocked }
+    return { added, replaced, blocked, deduped }
   }
 
   return {
@@ -472,6 +491,88 @@ export function createPool(options = {}) {
       }
       out.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
       return out
+    },
+    // ---- 压缩事务(2026-09-25):stage → commit/rollback ----
+    // 旧记忆先整体移入 staging.json(主池里清空),压缩标签以普通同步正常入主池;
+    // 验收合格 → commit(删 staging);不合格/失败 → rollback(原样放回主池)。
+    // 任何时刻旧记忆都有一份完整落盘副本,压缩事故(9-14 清池/9-22 丢 56 条)类彻底消灭。
+    stagingStatus() {
+      if (!existsSync(stagingFile)) return null
+      try {
+        const d = JSON.parse(readFileSync(stagingFile, 'utf8'))
+        return { startedAt: d?.startedAt ?? null, count: Array.isArray(d?.staged) ? d.staged.length : 0 }
+      } catch { return { startedAt: null, count: 0 } }
+    },
+    // 把过时条目移入暂存池(已有暂存时先自动回滚,防悬空丢失)。返回暂存条目(供压缩清单用)。
+    stageStale(days = 5) {
+      return mutate(() => {
+        load()
+        const oldStaging = existsSync(stagingFile) ? (() => { try { return JSON.parse(readFileSync(stagingFile, 'utf8')) } catch { return null } })() : null
+        if (oldStaging && Array.isArray(oldStaging.staged) && oldStaging.staged.length > 0) {
+          // 上一轮压缩没走完(崩溃/忘记点完成):先把旧暂存放回主池再开新一轮
+          for (const it of oldStaging.staged) restoreEntry(it)
+          console.warn(`[ecolink-service] 检测到遗留暂存池(${oldStaging.staged.length} 条),已自动回滚后重新暂存`)
+        }
+        const cutoff = Date.now() - days * 86400e3
+        const staged = []
+        const pull = (arr, sessionId = null) => {
+          for (let i = arr.length - 1; i >= 0; i--) {
+            const ts = new Date(arr[i].timestamp).getTime()
+            if (Number.isFinite(ts) && ts <= cutoff) staged.push({ ...arr[i], session_id: sessionId })
+          }
+        }
+        const keep = (arr, sessionId = null) => arr.filter((it) => {
+          const ts = new Date(it.timestamp).getTime()
+          return !(Number.isFinite(ts) && ts <= cutoff)
+        })
+        pull(state.shared_pool)
+        state.shared_pool = keep(state.shared_pool)
+        for (const sid of Object.keys(state.session_pools)) {
+          pull(state.session_pools[sid].memories ?? [], sid)
+          state.session_pools[sid].memories = keep(state.session_pools[sid].memories ?? [], sid)
+        }
+        staged.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
+        const payload = { startedAt: new Date().toISOString(), staged }
+        atomicWrite(stagingFile, JSON.stringify(payload, null, 2))
+        save()
+        return payload
+      })
+    },
+    // 验收合格:清掉暂存池(暂存条目不再需要——新标签已作为普通记忆入主池)
+    commitStaging() {
+      return mutate(() => {
+        load()
+        if (!existsSync(stagingFile)) return { committed: 0 }
+        const d = (() => { try { return JSON.parse(readFileSync(stagingFile, 'utf8')) } catch { return null } })()
+        const n = Array.isArray(d?.staged) ? d.staged.length : 0
+        unlinkSync(stagingFile)
+        return { committed: n }
+      })
+    },
+    // 验收不合格:暂存条目原样放回主池(恢复后做一次全池内容去重,吸收期间重复入池的同内容标签)
+    rollbackStaging() {
+      return mutate(() => {
+        load()
+        if (!existsSync(stagingFile)) return { restored: 0 }
+        const d = (() => { try { return JSON.parse(readFileSync(stagingFile, 'utf8')) } catch { return null } })()
+        const staged = Array.isArray(d?.staged) ? d.staged : []
+        for (const it of staged) restoreEntry(it)
+        // 全池内容去重:同内容保留首条(暂存条目先放回,新标签若内容一致则被吸收)
+        const seen = new Set()
+        const dedupe = (arr) => arr.filter((it) => {
+          const c = String(it.content ?? '').trim()
+          if (!c || seen.has(c)) return false
+          seen.add(c)
+          return true
+        })
+        state.shared_pool = dedupe(state.shared_pool)
+        for (const sid of Object.keys(state.session_pools)) {
+          state.session_pools[sid].memories = dedupe(state.session_pools[sid].memories ?? [])
+        }
+        unlinkSync(stagingFile)
+        save()
+        return { restored: staged.length }
+      })
     },
     recent(n = 10, sessionId = null) {
       load()

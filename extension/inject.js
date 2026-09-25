@@ -74,7 +74,7 @@
   // DSM(MIT,Md. Wahid)完整黑名单 + 本项目增量条目
   const SUBSTRING_BLACKLIST = [
     ...['example_name', 'extracted_name', 'extracted_country', 'extracted_language', 'placeholder', 'example', '[fact from user', '[extracted_', '[user_name]', '[user_country]', '[user_language]', 'your_name_here', 'your_country_here', 'sample_name'],
-    ...['brief fact', 'snake_case_key', 'fact from user', '记忆内容', '输出记忆标签', 'key: fact', '开头,紧接着写事实,以', '开头,紧接着写该条内容,以', '三部分连在一起', '事实内容'],
+    ...['brief fact', 'snake_case_key', 'fact from user', '记忆内容', '输出记忆标签', 'key: fact', '开头,紧接着写事实,以', '开头,紧接着写该条内容,以', '三部分连在一起', '事实内容', '压缩完成(重复'],
   ]
   const KEY_BLACKLIST = new Set(['snake_case_key', 'example', 'example_name', 'example_key', 'placeholder', 'sample', 'key'])
   function validContent(content, key) {
@@ -98,21 +98,28 @@
     // 前端可能把标签转义渲染(&lt;DSM:memory_write&gt;),先还原再解析(DSM Gr 同款)
     const s = String(text ?? '').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
     if (!s.includes(TAG)) return []
-    const attrRe = /<DSM:memory_write\s+key="[^"]*"\s+importance="[^"]*">[\s\S]*?<\/DSM:memory_write>/gi
+    // 2026-09-23 与 core/harvest.mjs 同步放宽:属性顺序可互换、引号可单可双、
+    // importance 取值放宽;只有 key 的残缺形式取内容兜底(此前严格锚定会把
+    // 半属性标签整条静默丢弃——"压缩标签没入池"根因之一)
+    const attrRe = /<DSM:memory_write\s+(?:key\s*=\s*["'][^"']*["']\s+importance\s*=\s*["'][^"']*["']|importance\s*=\s*["'][^"']*["']\s+key\s*=\s*["'][^"']*["'])>[\s\S]*?<\/DSM:memory_write>/gi
+    const keyOnlyRe = /<DSM:memory_write\s+key\s*=\s*["'][^"']*["']>([\s\S]*?)<\/DSM:memory_write>/gi
     const plainRe = /<DSM:memory_write>([\s\S]*?)<\/DSM:memory_write>/gi
     const raws = []
-    s.replace(attrRe, (all) => { raws.push(all); return '' }).replace(plainRe, (_a, inner) => { raws.push(inner); return '' })
+    s.replace(attrRe, (all) => { raws.push(all); return '' })
+      .replace(keyOnlyRe, (_a, inner) => { raws.push(inner); return '' })
+      .replace(plainRe, (_a, inner) => { raws.push(inner); return '' })
     const out = []
     for (let raw of raws) {
       raw = String(raw ?? '').trim()
-      // DSM 属性形式(完整标签):key = 压缩/更新闭环的覆盖锚点
-      const attr = /^<DSM:memory_write\s+key="([^"]*)"\s+importance="(always|called)">([\s\S]*?)<\/DSM:memory_write>$/i.exec(raw)
+      // DSM 属性形式(完整标签):key = 压缩/更新闭环的覆盖锚点(顺序/引号/importance 放宽)
+      const attr = /^<DSM:memory_write\s+(?:key\s*=\s*["']([^"']*)["']\s+importance\s*=\s*["'](always|called|key|temp|context)["']|importance\s*=\s*["'](always|called|key|temp|context)["']\s+key\s*=\s*["']([^"']*)["'])>([\s\S]*?)<\/DSM:memory_write>$/i.exec(raw)
       if (attr) {
-        const content = attr[3].trim()
-        const key = attr[1].trim()
+        const content = attr[5].trim()
+        const key = (attr[1] ?? attr[4])?.trim() || null
         if (validContent(content, key)) {
-          if (key.toLowerCase() === 'user_name' && userNameBlocked(content)) continue
-          out.push({ content, importance: attr[2] === 'always' ? 'key' : 'called', source: 'web', key: key || null })
+          if (String(key ?? '').toLowerCase() === 'user_name' && userNameBlocked(content)) continue
+          const imp = String(attr[2] ?? attr[3] ?? '').toLowerCase()
+          out.push({ content, importance: imp === 'always' || imp === 'key' ? 'key' : 'called', source: 'web', key })
         }
         continue
       }
@@ -235,11 +242,16 @@
   // 教训 3:让模型"只输出标签"→ 标签独占一行 → 前端把行首 <tag> 当 HTML 块吞掉,
   // DOM 里没有标签文本,收割落空。解法:要求标签跟在说明文字之后同行输出(行内
   // 标签会被前端当普通文本转义渲染 → DOM 可见 → 走与普通记忆相同的收割路径)
-  const COMPRESS_INSTRUCTION = '记忆压缩任务。下面是记忆池里的旧记忆,请逐条阅读后压缩合并:去掉重复条目,内容相近的合并成一条,保留日期、数字和专有名词。压缩完成后:先写一句简短说明(如"压缩完成"),然后紧接着在说明文字之后、同一行内,用空格分隔地输出全部标签。每条标签的写法(必须完全一致):以 <DSM:memory_write> 开头,紧接着写该条内容,以 </DSM:memory_write> 结尾。重要:标签必须跟在说明后面同行,禁止独占一行,禁止用代码块——独占一行的标签会被页面过滤掉,导致记忆无法保存。输出前逐条核对原文,确保没有遗漏和编造。'
+  const COMPRESS_INSTRUCTION = '记忆压缩任务。下面是记忆池里的旧记忆清单,每行格式:方括号内是该条的 key(英文标识),冒号后是内容。请逐条阅读后压缩合并:只合并内容明显重复或高度重叠的条目,不同主题必须各自保留、分别输出标签,任何旧记忆的信息都不得丢弃;宁可多输出几条也禁止过度合并。压缩完成后:先写一句说明,格式为 压缩完成(重复 N 条)——N 是你统计出的清单里内容完全重复或高度重叠、应直接合并或去掉的条数。验收规则(服务会严格按此验收,不满足则整批作废、旧记忆原样恢复):标签数量必须不少于"(清单总数 − N) × 三分之二"与"清单总数 × 十分之一"两者中的较大值;输出完标签后自己数一遍数量,不够就继续补齐。然后紧接着在说明文字之后、同一行内,用空格分隔地输出全部标签。每条标签必须写成完整属性形式:<DSM:memory_write key="snake_case_key" importance="always">事实内容</DSM:memory_write>。key 规则:内容未变的条目必须沿用清单里方括号中的原 key;只有合并或改写时才生成新 key(小写单词用下划线连接)。importance 按重要性写 always 或 called。重要:标签必须跟在说明后面同行,禁止独占一行,禁止用代码块——独占一行的标签会被页面过滤掉,导致记忆无法保存;即使标签很多也必须全部输出,禁止省略。输出前逐条核对原文,确保没有遗漏和编造。'
+  // 提取模型自报的重复数(说明行"压缩完成(重复 N 条)"),无报告返回 0
+  function extractDupReport(text) {
+    const m = /压缩完成\s*[(（]\s*重复\s*(\d+)\s*条\s*[)）]/.exec(String(text ?? ''))
+    return m ? Number(m[1]) : 0
+  }
   function buildCompressBlock(oldItems) {
     const lines = [SCOPE_PREFIX, COMPRESS_INSTRUCTION, '', '旧记忆清单:']
     for (const it of oldItems ?? []) {
-      lines.push('- ' + (it.content ?? ''))
+      lines.push(`- [${it.key ?? '-'}] ${it.content ?? ''}`)
     }
     lines.push(SCOPE_SUFFIX)
     return lines.join('\n')
@@ -447,6 +459,10 @@
           // 行首标签会被前端当 HTML 块吞掉、根本不渲染进 DOM(实测:压缩轮标签
           // 复制可见但 DOM 无痕迹),历史响应里的原始文本是可靠来源
           const rawMemories = parseMemoriesFromText(text)
+          if (compressMode.active) {
+            const dupNow = extractDupReport(text)
+            if (dupNow > 0) dispatchToContent({ type: 'dup-report', dup: dupNow, session_id: lastSid })
+          }
           if (rawMemories.length > 0) {
             const filtered = compressMode.active
               ? rawMemories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content) && !INSTRUCTION_PROMPT.includes(m.content))
@@ -459,7 +475,7 @@
             })
             if (fresh.length > 0) {
               diag('历史响应收割 ' + fresh.length + ' 条: ' + fresh.map((m) => m.content.slice(0, 20)).join(' | '))
-              dispatchToContent({ type: 'harvest', memories: fresh, session_id: lastSid })
+              dispatchToContent({ type: 'harvest', memories: fresh, session_id: lastSid, dup_report: extractDupReport(text) })
             }
           }
           // ⚠ 必须剥掉 content-encoding/content-length:fetch 已自动解压,
@@ -537,6 +553,10 @@
   function harvestAndStripNode(node) {
     try {
       const text = node.textContent || ''
+      // 2026-09-25:说明行"压缩完成(重复 N 条)"可能单独成节点(不含标签)→
+      // 独立上报,不能依赖标签收割的路径(此前自报数永远到不了后台)
+      const dupNow = compressMode.active ? extractDupReport(text) : 0
+      if (dupNow > 0) dispatchToContent({ type: 'dup-report', dup: dupNow, session_id: lastSid })
       if (!text.includes(TAG)) return
       const fp = contentFp(text)
       if (harvestedFp.has(fp)) return
@@ -565,7 +585,7 @@
       })
       if (fresh.length > 0 && !settings.muted) {
         diag('DOM 收割 ' + fresh.length + ' 条: ' + fresh.map((m) => m.content.slice(0, 24)).join(' | '))
-        dispatchToContent({ type: 'harvest', memories: fresh, session_id: lastSid })
+        dispatchToContent({ type: 'harvest', memories: fresh, session_id: lastSid, dup_report: extractDupReport(text) })
       }
       // 剥离(DSM Gr 同款:先还原转义,再同时剥原始与转义形式,防残留 &lt; 垃圾)
       const unescaped = text.replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
@@ -665,6 +685,8 @@
           }
           let memories = parseMemoriesFromText(acc)
           if (compressMode.active) {
+            const dupNow = extractDupReport(acc)
+            if (dupNow > 0) dispatchToContent({ type: 'dup-report', dup: dupNow, session_id: sessionId })
             memories = memories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content) && !INSTRUCTION_PROMPT.includes(m.content))
           }
           const fresh = memories.filter((m) => {
@@ -675,7 +697,7 @@
           })
           if (fresh.length > 0) {
             diag('源头收割 ' + fresh.length + ' 条: ' + fresh.map((m) => m.content.slice(0, 20)).join(' | '))
-            dispatchToContent({ type: 'harvest', memories: fresh, session_id: sessionId })
+            dispatchToContent({ type: 'harvest', memories: fresh, session_id: sessionId, dup_report: extractDupReport(acc) })
           }
         } catch { /* fail-open */ }
       })()

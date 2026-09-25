@@ -62,7 +62,7 @@
         pushFresh()
       } else if (d.type === 'harvest') {
         dbg('收到 harvest ' + (d.memories?.length ?? 0) + ' 条 → 转发 background')
-        chrome.runtime.sendMessage({ kind: 'harvest', memories: d.memories, session_id: d.session_id })
+        chrome.runtime.sendMessage({ kind: 'harvest', memories: d.memories, session_id: d.session_id, dup_report: d.dup_report })
           .then((resp) => {
             // 把收割后的最新池立即推回页面(新对话立刻可见)
             if (resp?.pool && typeof resp.pool === 'object') {
@@ -70,6 +70,12 @@
             }
           })
           .catch(() => {})
+      } else if (d.type === 'compress-seen') {
+        // 2026-09-25 修复:此前漏转发 → 后台"仅计压缩会话"过滤永远判空 → popup 恒显 0 标签
+        chrome.runtime.sendMessage({ kind: 'compress-seen', session_id: d.session_id }).catch(() => {})
+      } else if (d.type === 'dup-report') {
+        // 2026-09-25:模型自报重复数独立上报(说明行可能不含标签,不随 harvest 走)
+        chrome.runtime.sendMessage({ kind: 'dup-report', dup: d.dup, session_id: d.session_id }).catch(() => {})
       } else if (d.type === 'touch') {
         chrome.runtime.sendMessage({ kind: 'touch', ids: d.ids }).catch(() => {})
       } else if (d.type === 'diag') {

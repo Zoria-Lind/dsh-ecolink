@@ -1,7 +1,7 @@
 # dsh-ecolink-adapter bundle layer:挂载适配层。
 - insert:
     - id: ecolink-adapter
-      name: 'dsh-ecolink-adapter'
+      name: '@zoria-lind/dsh-ecolink-adapter'
       config:
         adapter:
           enabled: true

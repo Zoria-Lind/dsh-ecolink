@@ -13,7 +13,9 @@ function escapeRe(s) {
 const PREFIX_RE = /^(?:importance\s*:\s*(key|called|temp|context)\s*\|)/i
 // DSM 属性形式:<DSM:memory_write key="snake_key" importance="always|called">value</DSM:memory_write>
 // 模型对 DSM 格式有惯性,兼容吸收,服从率最高
-const ATTR_RE = /^<DSM:memory_write\s+key="[^"]*"\s+importance="(always|called)">([\s\S]*?)<\/DSM:memory_write>$/i
+// 2026-09-23 放宽:属性顺序可互换、引号可单可双、importance 取值放宽——此前严格锚定,
+// 模型写成 importance 在前或单引号时整条标签被静默丢弃("压缩标签没入池"根因之一)
+const ATTR_RE = /^<DSM:memory_write\s+(?:key\s*=\s*["']([^"']*)["']\s+importance\s*=\s*["'](always|called|key|temp|context)["']|importance\s*=\s*["'](always|called|key|temp|context)["']\s+key\s*=\s*["']([^"']*)["'])>([\s\S]*?)<\/DSM:memory_write>$/i
 
 // 模型常见不服从输出:占位/元话/自我描述/格式示例回显,一律不收(黑名单)。
 // DSM 同款防御(其 zm 校验函数实测对抗有效):
@@ -26,19 +28,23 @@ const STANDALONE_RE = /^(待补充|待填写|待确认|TODO|TBD|\.\.\.|暂无|�
 // DSM(MIT,Md. Wahid)完整黑名单 + 本项目的增量条目(指令回显等)
 const SUBSTRING_BLACKLIST = [
   ...['example_name', 'extracted_name', 'extracted_country', 'extracted_language', 'placeholder', 'example', '[fact from user', '[extracted_', '[user_name]', '[user_country]', '[user_language]', 'your_name_here', 'your_country_here', 'sample_name'],
-  ...['brief fact', 'snake_case_key', 'fact from user', '记忆内容', '输出记忆标签', 'key: fact', '开头,紧接着写事实,以', '开头,紧接着写该条内容,以', '三部分连在一起', '事实内容'],
+  ...['brief fact', 'snake_case_key', 'fact from user', '记忆内容', '输出记忆标签', 'key: fact', '开头,紧接着写事实,以', '开头,紧接着写该条内容,以', '三部分连在一起', '事实内容', '压缩完成(重复'],
 ]
 const KEY_BLACKLIST = new Set(['snake_case_key', 'example', 'example_name', 'example_key', 'placeholder', 'sample', 'key'])
 
 export function extractTags(text, tagName = DEFAULT_TAG) {
   const safe = escapeRe(tagName)
   const plainRe = new RegExp(`<${safe}>([\\s\\S]*?)</${safe}>`, 'gi')
-  const attrRe = new RegExp(`<${safe}\\s+key="[^"]*"\\s+importance="[^"]*">[\\s\\S]*?</${safe}>`, 'gi')
+  // 属性形式(顺序/引号放宽)完整保留给 parseTagContent 读属性;只有 key 的残缺形式
+  // 取内容入库(内容去重仍生效,key 丢失可接受——比整条静默丢弃强)
+  const attrRe = new RegExp(`<${safe}\\s+(?:key\\s*=\\s*["'][^"']*["']\\s+importance\\s*=\\s*["'][^"']*["']|importance\\s*=\\s*["'][^"']*["']\\s+key\\s*=\\s*["'][^"']*["'])>[\\s\\S]*?</${safe}>`, 'gi')
+  const keyOnlyRe = new RegExp(`<${safe}\\s+key\\s*=\\s*["'][^"']*["']>([\\s\\S]*?)</${safe}>`, 'gi')
   const memories = []
   // 前端可能把标签转义渲染(&lt;DSM:memory_write&gt;),先还原再解析(DSM Gr 同款)
   const cleaned = String(text ?? '').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
     // 属性形式保留完整标签(parseTagContent 要读属性),纯文本形式只取内容
     .replace(attrRe, (all) => { memories.push(all); return '' })
+    .replace(keyOnlyRe, (_all, inner) => { memories.push(inner); return '' })
     .replace(plainRe, (_all, inner) => { memories.push(inner); return '' })
   return { cleaned, memories }
 }
@@ -51,8 +57,9 @@ export function parseTagContent(raw) {
   // (key = 压缩/更新闭环的锚点:同 key 覆盖旧值,PLAN §4.4 replace 指令的天然载体)
   const a = ATTR_RE.exec(s)
   if (a) {
-    const key = /key="([^"]*)"/i.exec(s)?.[1]?.trim() || null
-    return { importance: a[1] === 'always' ? 'key' : 'called', content: a[2].trim(), key }
+    const key = (a[1] ?? a[4])?.trim() || null
+    const imp = String(a[2] ?? a[3] ?? '').toLowerCase()
+    return { importance: imp === 'always' || imp === 'key' ? 'key' : 'called', content: a[5].trim(), key }
   }
   return { importance: 'called', content: s, key: null }
 }

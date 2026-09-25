@@ -8,7 +8,19 @@ import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPool, precisionFor, renderTimestamp } from './pool.mjs'
-import { applyCompression } from './compress.mjs'
+import { applyCompression, extractDupReport, effectiveMinTags } from './compress.mjs'
+
+test('compress:extractDupReport/effectiveMinTags(动态下限)', () => {
+  assert.equal(extractDupReport('压缩完成(重复 45 条)<DSM:memory_write key="a" importance="always">x</DSM:memory_write>'), 45)
+  assert.equal(extractDupReport('压缩完成(重复45条)\n标签...'), 45)
+  assert.equal(extractDupReport('压缩完成\n<DSM:memory_write ...'), 0)
+  // 无重复:旧行为 2/3;自报重复放宽下限,兜底仅 1/10(重复极多的池子不再被误杀)
+  assert.equal(effectiveMinTags(60, 0, 0), 40)
+  assert.equal(effectiveMinTags(388, 100, 0), 192) // 自适应:ceil(288*2/3)
+  assert.equal(effectiveMinTags(388, 198, 0), 127) // 自适应主导
+  assert.equal(effectiveMinTags(388, 380, 0), 39) // 夸大自报被 1/10 兜底兜住
+  assert.equal(effectiveMinTags(2, 1, 0), 1)
+})
 
 // ---- pool 层 ----
 test('precisionFor 分档:分钟/小时/日期/不渲染', () => {
@@ -138,6 +150,51 @@ test('pool:stale 过时记忆清单(压缩流程用)', async () => {
   const stale1 = pool.stale(7)
   assert.equal(stale1.length, 2)
   assert.equal(pool.stale(30).length, 0)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('压缩事务:stage→commit / stage→rollback(暂存可回滚,零丢失)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ecolink-stage-'))
+  const pool = createPool({ dir })
+  await pool.sync({ memories: [{ content: '旧记忆A', key: 'old_a' }, { content: '旧记忆B', key: 'old_b' }] })
+  await pool.sync({ session_id: 'sess-x', memories: [{ content: '会话旧记忆' }] })
+  const backdate = (arr, content) => { const it = arr.find((x) => x.content === content); it.timestamp = new Date(Date.now() - 10 * 86400e3).toISOString() }
+  backdate(pool.pool().shared_pool, '旧记忆A')
+  backdate(pool.pool().shared_pool, '旧记忆B')
+  backdate(pool.pool().session_pools['sess-x'].memories, '会话旧记忆')
+
+  // stage:3 条全部移入暂存,主池清空,暂存落盘
+  const staging = await pool.stageStale(5)
+  assert.equal(staging.staged.length, 3)
+  assert.equal(pool.pool().shared_pool.length, 0)
+  assert.equal(pool.pool().session_pools['sess-x'].memories.length, 0)
+  assert.equal(pool.stagingStatus().count, 3)
+  assert.ok(existsSync(join(dir, 'staging.json')))
+
+  // 压缩标签普通入池(暂存期间主池无旧条目,同内容也正常新增)
+  const r = await pool.sync({ memories: [{ content: '旧记忆A', key: 'old_a_rewritten' }] })
+  assert.equal(r.added, 1)
+
+  // 验收通过 → commit:清暂存,主池只剩新标签
+  assert.equal((await pool.commitStaging()).committed, 3)
+  assert.equal(pool.stagingStatus(), null)
+  assert.equal(pool.pool().shared_pool.length, 1)
+
+  // 失败 → rollback:暂存原样放回
+  backdate(pool.pool().shared_pool, '旧记忆A')
+  assert.equal((await pool.stageStale(5)).staged.length, 1)
+  assert.equal(pool.pool().shared_pool.length, 0)
+  assert.equal((await pool.rollbackStaging()).restored, 1)
+  assert.equal(pool.pool().shared_pool.length, 1)
+  assert.equal(pool.pool().shared_pool[0].content, '旧记忆A')
+  assert.equal(pool.pool().shared_pool[0].key, 'old_a_rewritten')
+  assert.equal(pool.stagingStatus(), null)
+
+  // 遗留暂存(上次没走完就再 stage)→ 自动先回滚再暂存,绝不悬空
+  assert.equal((await pool.stageStale(5)).staged.length, 1)
+  assert.equal((await pool.stageStale(5)).staged.length, 1)
+  assert.equal(pool.stagingStatus().count, 1)
+  await pool.commitStaging()
   rmSync(dir, { recursive: true, force: true })
 })
 

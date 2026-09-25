@@ -9,18 +9,33 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 const COMMAND_NAME = 'ecolink-push'
 // 同仓服务配置(仅当 serviceToken 未显式配置时读 token 字段;每次推送热读,容忍失败)
 const SERVICE_CONFIG = join(dirname(fileURLToPath(import.meta.url)), '../../../service/config.json')
 
+// 2026-09-25:npm 安装时包内不含 config.json(发布包排除敏感文件)→
+// 追加 node_modules 里独立 service 包的配置候选(与 serviceGuard 双候选同款解析)。
+// 该包的 config.json 由服务首次启动自动生成 token,正是 npm 用户的真实 token 所在。
+function npmServiceConfig() {
+  try {
+    const req = createRequire(import.meta.url)
+    return join(dirname(req.resolve('@zoria-lind/dsh-ecolink-service/package.json')), 'service/config.json')
+  } catch { return null }
+}
+
 function resolveServiceToken(config) {
   if (config.serviceToken) return config.serviceToken
-  try {
-    if (existsSync(SERVICE_CONFIG)) {
-      return String(JSON.parse(readFileSync(SERVICE_CONFIG, 'utf8'))?.token ?? '')
-    }
-  } catch { /* 读不到就不带头,由服务端 401 提示 */ }
+  for (const cand of [SERVICE_CONFIG, npmServiceConfig()]) {
+    if (!cand) continue
+    try {
+      if (existsSync(cand)) {
+        const token = String(JSON.parse(readFileSync(cand, 'utf8'))?.token ?? '')
+        if (token) return token
+      }
+    } catch { /* 读不到就试下一个,最终不带头由服务端 401 提示 */ }
+  }
   return ''
 }
 
