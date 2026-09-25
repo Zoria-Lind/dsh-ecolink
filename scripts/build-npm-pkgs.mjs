@@ -49,7 +49,13 @@ function stage(out, pkg, { main, exports, bin, files, dsh }) {
 stage(OUT_ADAPTER, adapterPkg, {
   main: 'adapter/src/index.js',
   exports: { '.': './adapter/src/index.js' },
-  files: ['adapter/src', 'adapter/cordis.patch.yml', 'extension/core', 'service', 'README.md', 'LICENSE'],
+  files: [
+    'adapter/src', 'adapter/cordis.patch.yml', 'extension/core', 'service', 'README.md', 'LICENSE',
+    // 2026-09-25:发布包绝不允许带本机配置(service/config.json 含真实 token;
+    // config.json.bak-* 是本地备份)——发布事故级排除项
+    '!service/config.json', '!service/config.json.bak-*', '!service/*.log',
+    '!service/test.mjs', '!service/fix-pool.mjs',
+  ],
   dsh: { bundle: { patch: './adapter/cordis.patch.yml' } },
 })
 cpSync(join(REPO, 'adapter/README.md'), join(OUT_ADAPTER, 'README.md'))
@@ -59,6 +65,11 @@ stage(OUT_SERVICE, servicePkg, {
   main: 'service/server.mjs',
   exports: { '.': './service/server.mjs' },
   bin: { 'ecolink-service': 'service/server.mjs' },
-  files: ['service', 'extension/core', 'README.md', 'LICENSE'],
+  files: [
+    'service', 'extension/core', 'README.md', 'LICENSE',
+    // 同 adapter:本机配置/日志/测试/一次性工具不出包
+    '!service/config.json', '!service/config.json.bak-*', '!service/*.log',
+    '!service/test.mjs', '!service/fix-pool.mjs',
+  ],
 })
 cpSync(join(REPO, 'service/README.md'), join(OUT_SERVICE, 'README.md'))

@@ -2,6 +2,9 @@ node_modules/
 *.log
 .DS_Store
 service/config.json
+service/config.json.bak-*
+extension.pem
+extension.crx
 
 .publish-adapter/
 .publish-service/

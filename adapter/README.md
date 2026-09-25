@@ -12,13 +12,22 @@ dsh-ecolink 的 DSH 适配层(v1):直读本地记忆池(`~/.dsh-memory/memory.js
 > 建议确认队列(sync 进队列、确认才入池;未确认条目不进 DSH 上下文)(E5);
 > 网页端只读面板 + chrome.alarms badge(E6);静音 + 黑名单(E7);服务默认安全(E8)。
 >
+> **v0.2.0(2026-09-25,与 service/extension 同号发布)**:压缩体系重构在 service/扩展侧
+> (事务暂存池 → 模型自报重复数动态下限 → 提交/回滚,详见 service/README.md);
+> adapter 侧:install 方式改为 npm 包安装(`dsh plugin add @zoria-lind/dsh-ecolink-adapter`),
+> bundle patch 的 `name` 已改为 scoped 包名(修复 npm 安装 `cannot resolve package`)。
+>
 > **v1.1(2026-09-14)**:service 自动拉起——探测到 17520 未监听就本机 spawn 拉起
 > (apply + pre-step 60s 节流;仅本地 URL;`serviceAutoStart` 默认开)。E5 设计纠正:
 > 确认点改到 DSH 侧(待实现),随仓 config.json 设 `autoConfirm: true`,网页收割直入池。
 
-## 安装(link 挂载,与 token-optimizer 同款)
+## 安装
 
 ```bash
+# npm 安装(0.2.0 起推荐)
+dsh plugin --profile web add @zoria-lind/dsh-ecolink-adapter
+
+# 或本地路径(开发)
 dsh plugin --profile web add D:/dsh/dsh-plugins/dsh-ecolink/adapter
 ```
 
@@ -61,7 +70,7 @@ adapter:
 ## 测试
 
 ```bash
-node adapter/test/smoke.mjs   # 66 项,零 API
+node adapter/test/smoke.mjs   # 76 项,零 API
 ```
 
 ## 已知限制
@@ -72,5 +81,6 @@ node adapter/test/smoke.mjs   # 66 项,零 API
   待适配层稳定后启用
 - `inject.js` 仍是经典脚本,INSTRUCTION_PROMPT/BLOCK_RE 等与 core/*.mjs 镜像维护
   (注释锁死);彻底消除镜像需要构建期注入(P5/0D 结论)
-- adapter npm 发布口径未解决:`src/modules/memoryInject.js` 跨目录 import `extension/core/*`,
-  npm `files` 无法引用包根之外路径(E8#5 有据缓办;Junction 挂载不受影响)
+- npm 发布口径(0.1.3 起已解决):`src/modules/memoryInject.js` 跨目录 import `extension/core/*`,
+  发布时经 `scripts/build-npm-pkgs.mjs` 生成镜像仓库布局的 staging 包
+  (adapter/+extension/core/+service/ 平铺),发布前必须 `npm pack` 解包实测 import 链

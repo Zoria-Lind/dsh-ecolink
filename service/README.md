@@ -25,7 +25,7 @@ node service/server.mjs
 | poolDir | `~/.dsh-memory` | ECOLLINK_POOL_DIR | 记忆池目录 |
 | retentionDays | 30 | ECOLLINK_RETENTION_DAYS | 归档保留期(天) |
 | autoConfirm | false(代码默认;随仓 config.json 已设 **true**) | ECOLLINK_AUTO_CONFIRM | **2026-09-14 设计纠正**:确认点从网页端入池闸门改到 DSH 侧(待实现),故随仓默认 **true** = `/memory/sync` 直入池;**false** = 进建议确认队列,popup 确认后才入池(队列代码保留,显式关断才走)。两者均在服务启动时读取,改动后需重启 |
-| deepseekApiKey | `""` | ECOLLINK_DEEPSEEK_API_KEY | 备用 API 压缩用。**出于安全不再落盘 config.json**,以环境变量为默认来源(兼容读取旧字段) |
+| deepseekApiKey | `""` | ECOLLINK_DEEPSEEK_API_KEY | **API 压缩**用(模型 `deepseek-chat`;flash 系模型推理 token 会烧输出预算,2026-09-25 实测弃用)。**出于安全不再落盘 config.json**,以环境变量为默认来源(兼容读取旧字段) |
 
 ## 端点
 
@@ -40,7 +40,11 @@ node service/server.mjs
 | POST | /memory/session | `{ session_id, name?, delete? }` 会话命名/删除 |
 | POST | /memory/import-dsm | `{ entries: [{ key, value, importance }] }` DeepSeek Memory(DSM)一键导入,内容去重 |
 | POST | /memory/diag | `{ msg }` 诊断事件落 service.log(截 500 字) |
-| POST | /memory/compress | `{ days }`(0 合法)备用 API 压缩;需 `ECOLLINK_DEEPSEEK_API_KEY` |
+| POST | /memory/compress | `{ days }`(0 合法)**API 压缩(事务)**:暂存过时记忆 → 分块调用 `deepseek-chat` 压缩(60 条/块,块级+总量双验收)→ 通过则清除暂存、失败自动回滚。需 `ECOLLINK_DEEPSEEK_API_KEY`;**模型自报重复数超过总数一半时返回 `pendingConfirm: true` 并保留暂存,待人工 commit/rollback** |
+| POST | /memory/compress-stage | `{ days }` 压缩事务第 1 步:过时记忆整体移入 `staging.json`(主池清空该批;遗留暂存会先自动回滚),返回 `{ oldCount, staged }`(staged 即压缩清单) |
+| POST | /memory/compress-commit | 验收通过:清除暂存池 `{ committed }` |
+| POST | /memory/compress-rollback | 验收未过/失败:暂存条目原样放回主池 + 全池内容去重 `{ restored }`(零丢失) |
+| GET | /memory/compress-status | 暂存池状态 `{ staging: { startedAt, count } \| null }` |
 | POST | /memory/snapshot | 生成快照:`{ ok, hash }`;快照落 `<poolDir>/snapshots/<hash>.json`,latest.json 指向当前 |
 | GET | /memory/pool | 完整记忆池 |
 | GET | /memory/recent?n=10&session_id= | 最近 N 条(可按会话过滤) |
@@ -56,6 +60,17 @@ node service/server.mjs
 所有请求落盘日志到 `<poolDir>/service.log`(1MB 轮转),排障直接读文件。
 
 所有响应 JSON;写操作经内部队列串行化,落盘为 tmp+rename 原子写;文件损坏时自动备份并空池重启。
+
+## 压缩(0.2.0 重构:事务暂存 + 动态下限)
+
+双模式(网页端免费模型 / API)共用同一套**事务**:开始 → 暂存 → 新标签普通入池 → 验收 → 提交或回滚。旧记忆从压缩开始到验收前,**始终有一份完整落盘副本**(`<poolDir>/staging.json`),压缩事故类(误删/清池)在机制上不可能发生。
+
+1. **暂存(stage)**:过时记忆整体移入 staging.json,主池清空该批;压缩清单即暂存条目(每行 `[key] 内容`,供模型复用原 key 做同 key 覆盖);
+2. **压缩**:模型逐条阅读清单,输出说明 `压缩完成(重复 N 条)`(N = 模型统计的完全重复/高度重叠条数)+ 完整属性标签(`<DSM:memory_write key="…" importance="always|called">内容</…>`);标签经普通收割/同步通道入主池;
+3. **验收(动态下限)**:标签数必须 ≥ `max((清单总数 − N) × 2/3, 清单总数 × 1/10)`——重复越多的池子允许输出越少,模型自报的 N 是重复数的最终裁判(池层另做全池内容级去重兜底:不同 key 同内容直接跳过);
+4. **提交/回滚**:达标 → commit 清暂存;不达标或中途失败 → rollback,暂存条目原样放回主池(零丢失)。API 模式下自报重复超过总数一半时**不自动提交**,返回 `pendingConfirm` 由用户在 popup 确认后才清暂存(防模型夸大自报)。
+
+已知取舍:压缩期间主池短暂不含该批暂存记忆(DSH 适配层/网页注入的窗口期,分钟级)。
 
 ## 时间戳分层(§4.2)
 
