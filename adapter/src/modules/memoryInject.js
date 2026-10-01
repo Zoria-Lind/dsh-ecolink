@@ -69,8 +69,8 @@ export function createMemoryInjectModule(ctx, config, stats, deps = {}) {
   }
 
   // 指令消息识别(幂等剥旧用:summary 唯一属于本插件的指令快照)
-  const isOwnInstruction = (m) => m?.source?.kind === 'plugin'
-    && m?.source?.plugin === 'ecolink-adapter'
+  // v4 source 约定(2026-10-01):kind = 'plugin:<插件名>',不再有 plugin 字段
+  const isOwnInstruction = (m) => m?.source?.kind === 'plugin:ecolink-adapter'
     && m?.source?.summary === INSTRUCTION_SUMMARY
 
   // 指令快照消息(与内核 dsh-time-context 同款形状:form='snapshot' + sections)
@@ -83,7 +83,7 @@ export function createMemoryInjectModule(ctx, config, stats, deps = {}) {
     const text = buildInstructionBlock().replace('[/dsh-ecolink 指令]', READ_HINT + '\n[/dsh-ecolink 指令]')
     return createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'ecolink-adapter', form: 'snapshot', summary: INSTRUCTION_SUMMARY, sections: [{ name: 'ecolink-instruction', text }] },
+      source: { kind: 'plugin:ecolink-adapter', form: 'snapshot', summary: INSTRUCTION_SUMMARY, sections: [{ name: 'ecolink-instruction', text }] },
     })
   }
 
