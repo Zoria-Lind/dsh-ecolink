@@ -116,7 +116,7 @@ console.log('== 指令通道(E1 默认开) ==')
   check('用户消息不被改写', d1.messages[0].content === '帮我复习微积分补考')
   check('指令快照追加在末尾', d1.messages.length === 2 && /\[dsh-ecolink 指令\]/.test(txt(d1.messages[1].content)))
   check('指令标记成对', txt(d1.messages[1].content).includes('[/dsh-ecolink 指令]'))
-  check('指令消息 source 形状', d1.messages[1].source?.kind === 'plugin' && d1.messages[1].source?.plugin === 'ecolink-adapter' && d1.messages[1].source?.summary === 'ecolink-instruction')
+  check('指令消息 source 形状', d1.messages[1].source?.kind === 'plugin:ecolink-adapter' && d1.messages[1].source?.summary === 'ecolink-instruction')
   check('不含记忆内容', !/短标题|微积分补考范围是前三章/.test(txt(d1.messages[1].content)))
 
   // 2) 每轮幂等:下一轮(claimed 里没有旧指令消息)仍恰好 1 条指令消息
@@ -171,7 +171,7 @@ console.log('== 内容通道逃生舱(E1 默认关) ==')
   check('#记忆名 不混入共享池', !/短标题/.test(t3))
 
   // 4) 运行时上下文快照(source.kind='plugin')放行不改写
-  const runtime = { role: 'user', source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, content: 'Current runtime context.'.repeat(50) }
+  const runtime = { role: 'user', source: { kind: 'plugin:@deepseek-ai/dsh-system-prompt' }, content: 'Current runtime context.'.repeat(50) }
   const d4 = await ctx.emit('agent/pre-step', { agent: agentOf('b3', 'ds-b3'), signal: {} }, async () => ({ kind: 'enter', messages: [runtime] }))
   check('运行时上下文快照原样放行', d4.messages[0].content === runtime.content)
 }
