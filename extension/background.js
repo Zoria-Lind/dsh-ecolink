@@ -231,12 +231,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           // 而压缩结果还躺在队列里没入池 → 用户不确认就是数据丢失
           const cs = await getCompressState()
           const compressActive = cs.active === true
+          const sid = typeof msg.session_id === 'string' ? msg.session_id : ''
+          // 2026-10-01:压缩会话的收割不带 session_id → 合并结果进**共享池**。
+          // 此前压缩标签带着压缩聊天自己的 sid 落进那一个会话池——会话一删,
+          // 压缩后的记忆跟着消失(且归属语义错误:压缩是全池整合,应回共享池)。
+          const isCompressSession = compressActive && sid.length > 0 && (Array.isArray(cs.sessions) ? cs.sessions.includes(sid) : false)
           blog('[ecolink:bg] harvest ' + msg.memories.length + ' 条 → 入队: ' + msg.memories.map((m) => m.content.slice(0, 30)).join(' | '))
           const q = await getQueue()
           await q.push({
             kind: 'sync',
             payload: {
-              session_id: typeof msg.session_id === 'string' ? msg.session_id : null,
+              session_id: isCompressSession ? null : (typeof msg.session_id === 'string' ? msg.session_id : null),
               memories: msg.memories,
               ...(compressActive ? { confirm: true } : {}),
             },
