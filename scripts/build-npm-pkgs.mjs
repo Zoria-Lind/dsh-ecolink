@@ -56,7 +56,9 @@ stage(OUT_ADAPTER, adapterPkg, {
     '!service/config.json', '!service/config.json.bak-*', '!service/*.log',
     '!service/test.mjs', '!service/fix-pool.mjs',
   ],
-  dsh: { bundle: { patch: './adapter/cordis.patch.yml' } },
+  // 2026-10-02:合并包自身的 dsh 字段(compatibility 等)——此前硬编码只留 bundle.patch,
+  // adapter/package.json 里加的 dsh.compatibility 在发布包里被静默丢掉
+  dsh: { ...(adapterPkg.dsh ?? {}), bundle: { patch: './adapter/cordis.patch.yml' } },
 })
 cpSync(join(REPO, 'adapter/README.md'), join(OUT_ADAPTER, 'README.md'))
 
