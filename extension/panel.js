@@ -41,7 +41,10 @@
       .list { overflow: auto; padding: 6px 10px 10px; }
       .group { margin: 8px 0 4px; font-weight: 600; color: #0ea5a4; font-size: 12px; }
       .item { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
-      .item .txt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .item .txt { flex: 1; min-width: 0; }
+      .item .content { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .item time { display: block; opacity: .7; font-size: 11px; }
+      .order { padding: 6px 10px 0; opacity: .7; font-size: 11px; }
       .item button { all: initial; cursor: pointer; padding: 2px 8px; border: 1px solid rgba(128,128,128,.5);
                      border-radius: 5px; font: 12px system-ui,sans-serif; color: inherit; }
       .empty { color: rgba(128,128,128,.9); font-size: 12px; margin: 8px 0; }
@@ -56,7 +59,7 @@
 
     const panel = document.createElement('div')
     panel.className = 'panel'
-    panel.innerHTML = '<div class="head"><input type="search" placeholder="搜索记忆…"></div><div class="list"></div>'
+    panel.innerHTML = '<div class="head"><input type="search" placeholder="搜索记忆…"></div><div class="order">最新在上 · 按新增或内容更新时间</div><div class="list"></div>'
     root.appendChild(panel)
 
     const search = panel.querySelector('input')
@@ -90,6 +93,11 @@
       host.style.display = off ? 'none' : ''
     }
 
+    function recordTime(value) {
+      const time = Date.parse(value)
+      return Number.isFinite(time) ? time : -Infinity
+    }
+
     function allItems() {
       const out = []
       for (const it of pool?.shared_pool ?? []) out.push({ content: it?.content, ts: it?.timestamp, group: '共享记忆' })
@@ -107,7 +115,7 @@
         const q = String(search.value ?? '').trim().toLowerCase()
         const items = allItems()
           .filter((it) => it.content && (!q || it.content.toLowerCase().includes(q)))
-          .sort((a, b) => String(b.ts ?? '').localeCompare(String(a.ts ?? '')))
+          .sort((a, b) => recordTime(b.ts) - recordTime(a.ts))
           .slice(0, 200)
         if (items.length === 0) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = q ? '无匹配记忆' : '记忆池为空'; listEl.appendChild(d); return }
         let lastGroup = ''
@@ -123,8 +131,17 @@
           row.className = 'item'
           const txt = document.createElement('span')
           txt.className = 'txt'
-          txt.textContent = it.content
-          txt.title = it.content
+          const content = document.createElement('span')
+          content.className = 'content'
+          content.textContent = it.content
+          content.title = it.content
+          const time = document.createElement('time')
+          time.title = '新增或内容更新时间'
+          if (Number.isFinite(recordTime(it.ts))) {
+            time.dateTime = it.ts
+            time.textContent = new Date(it.ts).toLocaleString('zh-CN', { hour12: false })
+          } else time.textContent = '时间未知'
+          txt.append(content, time)
           const ins = document.createElement('button')
           ins.textContent = '插入'
           ins.title = '把这条记忆插入输入框'

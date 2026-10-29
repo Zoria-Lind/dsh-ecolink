@@ -4,13 +4,13 @@ export const DEFAULT_CONFIG = {
   adapter: {
     enabled: true,
     poolPath: '~/.dsh-memory/memory.json', // 只读;唯一写者是 ecolink-service
-    poolTtlMs: 5000,          // 池文件缓存(mtime 变化立即重读,否则 TTL 兜底)
-    injectEnabled: true,      // 总开关(false = 两个通道全关)
-    singleInjection: true,    // 内容通道专用:每 DSH 会话只注入一次(指令通道天然每轮幂等,不适用)
-    maxInjectionChars: 3000,  // 内容通道注入预算(长提示词自动缩减,与网页端同规则)
+    poolTtlMs: 5000,          // 兼容旧配置；指定读取现为每次读取最新池文件
+    injectEnabled: true,      // 关闭自动开局及指令注入；侧栏显式注入仍需用户点击
+    singleInjection: true,    // 兼容旧配置；正文按版本/范围持久去重
+    maxInjectionChars: 3000,  // 每步正文注入字符预算；长文需显式选择分页
     // E1 通道分离:指令每轮幂等注入(维持 DSM:memory_write 捕获);内容默认不再注入
     instructionEnabled: true,       // 指令通道(pre-step 追加 plugin 快照消息)
-    contentInjectionEnabled: false, // 内容通道逃生舱(旧行为:改写用户消息注入记忆块)
+    contentInjectionEnabled: false, // 兼容旧配置；不再绕过通用/非通用策略
     skillName: 'ecolink-memory',    // E2 记忆 skill 的注册名(kebab-case)
     // E4 写回:POST /memory/sync 到本机 service(service 是唯一写者,DSH 只发请求)
     serviceUrl: 'http://127.0.0.1:17520',

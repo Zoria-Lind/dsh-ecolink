@@ -1,17 +1,9 @@
 // dsh-ecolink-web content script v2(document_start,隔离世界)。
-// 职责:①注入 MAIN world 脚本;②把配置+记忆池推入页面(CustomEvent,页内同步缓存);
+// 职责:①MAIN 脚本由 manifest 在 document_start 直接加载;②把配置+记忆池推入页面(CustomEvent,页内同步缓存);
 // ③转发页面的收割/touch 事件到 background。一切失败静默。
 
 ;(() => {
   'use strict'
-  if (document.getElementById('__ecolink_hook')) return
-  const s = document.createElement('script')
-  s.id = '__ecolink_hook'
-  s.src = chrome.runtime.getURL('inject.js')
-  s.async = false
-  s.onload = () => s.remove()
-  ;(document.head || document.documentElement).appendChild(s)
-
   let DEBUG = false
   try { DEBUG = window.localStorage.getItem('ecolink_debug') === '1' } catch { /* ignore */ }
   const dbg = (...a) => { if (DEBUG) { try { console.log('%c[ecolink:content]', 'color:#2563eb', ...a) } catch { /* ignore */ } } }

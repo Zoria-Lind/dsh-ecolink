@@ -50,6 +50,7 @@ export function scoreItem(item, prompt, now = Date.now()) {
 // 在预算内精选:按分数排序取前 N,单条截断到 500 字符
 export function selectMemories(items, prompt, budgetChars = 3000, now = Date.now()) {
   const scored = items
+    .filter(item => item?.kind !== 'artifact')
     .map((item) => ({ item, score: scoreItem(item, prompt, now) }))
     .sort((a, b) => b.score - a.score || (b.item?.timestamp ?? '').localeCompare(a.item?.timestamp ?? ''))
   const chosen = []

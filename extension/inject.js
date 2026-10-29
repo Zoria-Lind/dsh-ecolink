@@ -12,13 +12,13 @@
   if (window[Symbol.for('__ecolink')]) return
   Object.defineProperty(window, Symbol.for('__ecolink'), { value: true, writable: false, configurable: false })
 
-  const VERSION = 'v3' // 页面注入脚本版本(诊断通道会报给服务日志,确认页面跑的是不是最新)
+  const VERSION = 'v4' // 页面注入脚本版本(诊断通道会报给服务日志,确认页面跑的是不是最新)
 
   const TAG = 'DSM:memory_write'
   const SCOPE_PREFIX = '[dsh-ecolink 记忆]'
   const SCOPE_SUFFIX = '[/dsh-ecolink 记忆]'
-  const COMPLETION_RE = /\/api\/v0\/chat\/completion/
-  const HISTORY_RE = /\/api\/v0\/(chat_session|conversation|chat\/edit_message)|chat_session|fetch_page/
+  const COMPLETION_RE = /\/api\/v0\/chat\/(?:completion|regenerate)(?:[?/#]|$)/
+  const HISTORY_RE = /\/api\/v0\/(?:chat_session|conversation|chat\/(?:edit_message|history_messages))|chat_session|fetch_page/
   const EDIT_RE = /\/api\/v0\/chat\/edit_message/
   // DSM 同款快路径:含通用 <DSM: 前缀/闭合(历史残留可能不包 <dsmemory> 壳,如 <DSM:SKILLS>)
   const MARKER_RE = /DSM:memory_write|<dsmemory>|MEMORY_SYSTEM|<DSM:|<\/DSM:|&lt;DSM:|&lt;\/DSM:|\[dsh-ecolink 记忆\]|\[dsh-ecolink 指令\]/
@@ -213,7 +213,7 @@
   }
   function selectMemories(items, prompt, budgetChars) {
     const now = Date.now()
-    const scored = (items ?? []).map((item) => ({ item, score: scoreItem(item, prompt, now) }))
+    const scored = (items ?? []).filter(item => item?.kind !== 'artifact').map((item) => ({ item, score: scoreItem(item, prompt, now) }))
       .sort((a, b) => b.score - a.score || String(b.item?.timestamp ?? '').localeCompare(String(a.item?.timestamp ?? '')))
     const chosen = []
     let used = 0
@@ -383,22 +383,91 @@
     return v
   }
 
+
+  function emitArtifactHistory(payload, sessionId, pagePath, requestId, error) {
+    try { window.dispatchEvent(new CustomEvent('ecolink:artifact-history', {detail:JSON.stringify({payload,sessionId,pagePath,requestId,error})})) } catch { /* independent of short harvesting */ }
+  }
+  function historyText(payload) {
+    const data=payload?.data?.biz_data??payload?.biz_data??payload?.data??payload
+    const messages=data?.chat_messages??data?.messages??[]
+    return Array.isArray(messages)?messages.filter(m=>String(m?.message_role??m?.role??'').toLowerCase()==='assistant').map(m=>
+      Array.isArray(m.fragments)?m.fragments.filter(f=>f?.type==='RESPONSE').map(f=>f.content??'').join(''):typeof m.content==='string'?m.content:'').join('\n'):''
+  }
+  function harvestSource(text,sessionId,label) {
+    if(!settings.harvestEnabled||settings.muted)return
+    let memories=parseMemoriesFromText(text)
+    const dup=compressMode.active?extractDupReport(text):0
+    if(dup>0)dispatchToContent({type:'dup-report',dup,session_id:sessionId})
+    if(compressMode.active)memories=memories.filter(m=>!COMPRESS_INSTRUCTION.includes(m.content)&&!SYSTEM_PROMPT.includes(m.content)&&!INSTRUCTION_PROMPT.includes(m.content))
+    const fresh=memories.filter(m=>{
+      const fp=contentFp(m.content)
+      if(harvestedFp.has(fp))return false
+      harvestedFp.add(fp)
+      if(harvestedFp.size>1000)harvestedFp.delete(harvestedFp.values().next().value)
+      return true
+    })
+    if(fresh.length){diag(label+'收割 '+fresh.length+' 条');dispatchToContent({type:'harvest',memories:fresh,session_id:sessionId,dup_report:dup})}
+  }
+  // Decode JSON before assembling tags: a tag may span several SSE events.
+  function streamText(raw) {
+    let fragments=[],text='',path='',operation='APPEND'
+    function patch(p,o,v,depth=0){
+      if(depth>8)throw Error('nested patch')
+      if(o==='BATCH'){for(const child of v??[])patch(p?p+'/'+child.p:child.p,child.o??'APPEND',child.v,depth+1)}
+      else if(p==='response'){
+        if(Array.isArray(v?.fragments))fragments=v.fragments.map(f=>({...f}))
+        else if(typeof v?.content==='string')fragments=[{type:'RESPONSE',content:v.content}]
+      }else if(p==='response/fragments'&&Array.isArray(v)){
+        if(o==='SET')fragments=v.map(f=>({...f}));else if(o==='APPEND')fragments.push(...v.map(f=>({...f})))
+      }else if(/^response\/fragments\/-?\d+\/content$/.test(p)&&typeof v==='string'){
+        const n=Number(p.split('/')[2]),f=fragments[n<0?fragments.length+n:n]
+        if(f){if(o==='SET')f.content=v;else if(o==='APPEND')f.content=(f.content??'')+v}
+      }
+    }
+    for(const block of String(raw).split(/\r?\n\r?\n/)){
+      const data=block.split(/\r?\n/).filter(l=>l.startsWith('data:')).map(l=>l.slice(5).trimStart()).join('\n').trim()
+      if(!data||data==='[DONE]')continue
+      const e=JSON.parse(data)
+      if(e.error)continue
+      if(Array.isArray(e.choices)){if(typeof e.choices[0]?.delta?.content==='string')text+=e.choices[0].delta.content;continue}
+      if(e.v?.response){patch('response','SET',e.v.response);continue}
+      if(typeof e.p==='string'){path=e.p;operation=e.o??'APPEND'}else if(typeof e.o==='string')operation=e.o
+      if(Object.hasOwn(e,'v'))patch(path,operation,e.v)
+    }
+    return fragments.length?fragments.filter(f=>f.type==='RESPONSE').map(f=>f.content??'').join(''):text
+  }
+  const clientHeaders=new Headers()
+  function rememberHeaders(input,init,url) {
+    try {
+      const target=new URL(url,window.location.href??'https://chat.deepseek.com')
+      if(target.origin!=='https://chat.deepseek.com'||!target.pathname.startsWith('/api/'))return
+      const headers=new Headers(init?.headers??(input instanceof Request?input.headers:undefined))
+      headers.forEach((value,key)=>{if(key==='authorization'||key==='x-app-version'||key.startsWith('x-client-'))clientHeaders.set(key,value)})
+    } catch { /* no credentials leave the page */ }
+  }
+  function routeSession(path) {return /^\/(?:a\/chat\/s|chat)\/([^/?#]+)\/?$/.exec(path??'')?.[1]}
+
   // ---- fetch patch(DSM K 模式) ----
   const origFetch = window.fetch
   window.fetch = async function (input, init) {
     try {
+      const sourcePath = window.location?.pathname
       const url = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : (input instanceof Request ? input.url : String(input)))
+      rememberHeaders(input,init,url)
       const isCompletion = COMPLETION_RE.test(url) && !HISTORY_RE.test(url)
 
-      if (isCompletion && settings.injectEnabled && !settings.muted) {
-        // 请求注入:body 提取(异步,无跨上下文等待)+ 同步注入
+      // Resolve request identity once, including when automatic memory injection is off.
+      let payload = null
+      if (isCompletion) {
         let bodyText = null
         if (init && typeof init.body === 'string') bodyText = init.body
         else if (input instanceof Request) { try { bodyText = await input.clone().text() } catch { /* fallthrough */ } }
         else if (init && init.body) { try { bodyText = String(init.body) } catch { /* fallthrough */ } }
+        if (bodyText) { try { payload = JSON.parse(bodyText) } catch { /* non-JSON: no injection */ } }
+      }
+      const requestSid = payload?.chat_session_id ?? payload?.conversation_id ?? payload?.chat_id ?? routeSession(sourcePath) ?? null
+      if (isCompletion && settings.injectEnabled && !settings.muted) {
         let resp
-        let payload = null
-        if (bodyText) { try { payload = JSON.parse(bodyText) } catch { /* 非 JSON:不注入 */ } }
         if (payload && typeof payload === 'object') {
           const out = maybeInject(payload)
           if (out.changed) {
@@ -426,7 +495,7 @@
         // 源头收割(最终方案):tee 只读分支——前端拿原流(零改动零延迟),
         // 我们后台消费扫描分支提取标签。行首标签被前端吞、SPA 从 IndexedDB 恢复
         // 都不影响:标签在源头必然存在
-        return teeHarvest(resp, lastSid)
+        return teeHarvest(resp, requestSid, true, sourcePath)
       }
 
       if (EDIT_RE.test(url)) {
@@ -448,51 +517,56 @@
         }
       }
 
-      if (HISTORY_RE.test(url) && settings.harvestEnabled && !settings.muted) {
-        // 历史接口响应清洗(防注入块持久化进前端历史)+ 历史数据收割
+      if (HISTORY_RE.test(url) && !settings.muted) {
         const resp = await origFetch.apply(this, arguments)
         try {
-          const text = await resp.clone().text()
-          if (!MARKER_RE.test(text)) return resp
-          const parsed = JSON.parse(text)
-          // 从服务端原始消息里收割标签——弥补 DOM 收割的盲区:
-          // 行首标签会被前端当 HTML 块吞掉、根本不渲染进 DOM(实测:压缩轮标签
-          // 复制可见但 DOM 无痕迹),历史响应里的原始文本是可靠来源
-          const rawMemories = parseMemoriesFromText(text)
-          if (compressMode.active) {
-            const dupNow = extractDupReport(text)
-            if (dupNow > 0) dispatchToContent({ type: 'dup-report', dup: dupNow, session_id: lastSid })
-          }
-          if (rawMemories.length > 0) {
-            const filtered = compressMode.active
-              ? rawMemories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content) && !INSTRUCTION_PROMPT.includes(m.content))
-              : rawMemories
-            const fresh = filtered.filter((m) => {
-              const mfp = contentFp(m.content)
-              if (harvestedFp.has(mfp)) return false
-              harvestedFp.add(mfp)
-              return true
-            })
-            if (fresh.length > 0) {
-              diag('历史响应收割 ' + fresh.length + ' 条: ' + fresh.map((m) => m.content.slice(0, 20)).join(' | '))
-              dispatchToContent({ type: 'harvest', memories: fresh, session_id: lastSid, dup_report: extractDupReport(text) })
-            }
-          }
-          // ⚠ 必须剥掉 content-encoding/content-length:fetch 已自动解压,
-          // 但响应头仍声称 gzip/br——原样带回会让前端对明文二次解压 → 乱码(实测事故)
+          const text = await resp.clone().text(), parsed = JSON.parse(text)
+          const sid = new URL(url,window.location.href??'https://chat.deepseek.com').searchParams.get('chat_session_id')??requestSid
+          emitArtifactHistory(parsed,sid,sourcePath)
+          if(!settings.harvestEnabled||!MARKER_RE.test(text))return resp
+          harvestSource(historyText(parsed),sid,'历史响应')
           const headers = new Headers(resp.headers)
-          headers.delete('content-encoding')
-          headers.delete('content-length')
-          return new Response(JSON.stringify(scrubValue(parsed, 0)), { status: resp.status, statusText: resp.statusText, headers })
+          headers.delete('content-encoding');headers.delete('content-length')
+          return new Response(JSON.stringify(scrubValue(parsed,0)), {status:resp.status,statusText:resp.statusText,headers})
         } catch { return resp }
       }
 
-      return origFetch.apply(this, arguments)
+      const response = await origFetch.apply(this, arguments)
+      // 显式保存全文独立于自动记忆注入开关；此分支不额外收割短记忆。
+      return isCompletion ? teeHarvest(response, requestSid, false, sourcePath) : response
     } catch (err) {
       dbg('fetch patch 异常,放行原请求: ' + (err?.message ?? err))
       return origFetch.apply(this, arguments)
     }
   }
+
+  const HISTORY_READ_TIMEOUT_MS = 30000
+  window.addEventListener('ecolink:artifact-history-request', async e => {
+    let request
+    try {
+      request=JSON.parse(e.detail)
+      if(request.pagePath!==window.location.pathname)return
+      const sid=routeSession(request.pagePath)
+      if(!sid||settings.muted)throw Error('当前页面无法读取历史，或 ecolink 已暂停')
+      const headers=new Headers(clientHeaders);headers.set('accept','application/json')
+      if(!headers.has('authorization')){
+        let token=window.localStorage.getItem('userToken')
+        try{const value=JSON.parse(token);token=typeof value==='string'?value:value?.token??value?.value??value?.accessToken}catch{}
+        if(token&&token!=='null')headers.set('authorization',String(token).startsWith('Bearer ')?token:'Bearer '+token)
+      }
+      const url=new URL('/api/v0/chat/history_messages','https://chat.deepseek.com')
+      url.searchParams.set('chat_session_id',sid)
+      const response=await origFetch.call(window,url.toString(),{method:'GET',headers,credentials:'include',signal:AbortSignal.timeout(HISTORY_READ_TIMEOUT_MS)})
+      if(!response.ok)throw Error('网页历史读取失败（'+response.status+'），请刷新已登录的网页')
+      const payload=await response.json()
+      emitArtifactHistory(payload,sid,request.pagePath,request.requestId)
+      harvestSource(historyText(payload),sid,'历史响应')
+    }catch(error){
+      const timedOut=error?.name==='TimeoutError'||/timed\s*out|timeout/i.test(error?.message??'')
+      const message=timedOut?'读取原文超过30秒，请检查网络后点击“重新读取当前对话原文”重试。':error?.message??'历史读取失败'
+      emitArtifactHistory(null,null,request?.pagePath,request?.requestId,message)
+    }
+  })
 
   // ---- XHR patch:仅请求侧同步注入(与页内缓存同源;响应收割交给 DOM 层) ----
   try {
@@ -523,14 +597,22 @@
             } catch { /* 非 JSON:放行 */ }
           }
           // 历史接口响应清洗(DSM J() 同款:load 后 scrubbed + defineProperty)
-          if (settings.harvestEnabled && !settings.muted && HISTORY_RE.test(this.__ecolinkUrl ?? '')) {
+          if (!settings.muted && HISTORY_RE.test(this.__ecolinkUrl ?? '')) {
             this.addEventListener('load', () => {
               try {
-                const raw = this.responseText
-                if (typeof raw !== 'string' || !MARKER_RE.test(raw)) return
-                const cleaned = JSON.stringify(scrubValue(JSON.parse(raw), 0))
-                try { Object.defineProperty(this, 'responseText', { value: cleaned, writable: false, configurable: true }) } catch { /* ignore */ }
-                try { Object.defineProperty(this, 'response', { value: cleaned, writable: false, configurable: true }) } catch { /* ignore */ }
+                const isJson=this.responseType==='json'
+                const parsed=isJson?this.response:JSON.parse(this.responseText)
+                const sid=new URL(this.__ecolinkUrl,window.location.href??'https://chat.deepseek.com').searchParams.get('chat_session_id')??routeSession(window.location.pathname)
+                emitArtifactHistory(parsed,sid,window.location.pathname)
+                if(!settings.harvestEnabled)return
+                harvestSource(historyText(parsed),sid,'历史响应')
+                const cleaned=scrubValue(parsed,0)
+                if(isJson){try{Object.defineProperty(this,'response',{value:cleaned,configurable:true})}catch{}}
+                else {
+                  const text=JSON.stringify(cleaned)
+                  try{Object.defineProperty(this,'responseText',{value:text,configurable:true})}catch{}
+                  try{Object.defineProperty(this,'response',{value:text,configurable:true})}catch{}
+                }
               } catch { /* fail-open */ }
             })
           }
@@ -669,8 +751,8 @@
   // scanBranch 后台消费提取标签。与流重写(曾致卡死)不同:tee 不改动交付分支
   // 的任何字节与节奏。行首标签被前端当 HTML 块吞、SPA 从 IndexedDB 恢复历史
   // 都不影响——标签在源头必然存在(函数声明提升,fetch patch 可提前引用)
-  function teeHarvest(resp, sessionId) {
-    if (settings.muted || !settings.harvestEnabled || !resp?.ok || !resp?.body || typeof resp.body.tee !== 'function') return resp
+  function teeHarvest(resp, sessionId, harvest = true, pagePath) {
+    if (settings.muted || !resp?.ok || !resp?.body || typeof resp.body.tee !== 'function') return resp
     try {
       const [appBranch, scanBranch] = resp.body.tee()
       ;(async () => {
@@ -683,22 +765,14 @@
             if (done) break
             acc += decoder.decode(value, { stream: true })
           }
-          let memories = parseMemoriesFromText(acc)
-          if (compressMode.active) {
-            const dupNow = extractDupReport(acc)
-            if (dupNow > 0) dispatchToContent({ type: 'dup-report', dup: dupNow, session_id: sessionId })
-            memories = memories.filter((m) => !COMPRESS_INSTRUCTION.includes(m.content) && !SYSTEM_PROMPT.includes(m.content) && !INSTRUCTION_PROMPT.includes(m.content))
-          }
-          const fresh = memories.filter((m) => {
-            const mfp = contentFp(m.content)
-            if (harvestedFp.has(mfp)) return false
-            harvestedFp.add(mfp)
-            return true
-          })
-          if (fresh.length > 0) {
-            diag('源头收割 ' + fresh.length + ' 条: ' + fresh.map((m) => m.content.slice(0, 20)).join(' | '))
-            dispatchToContent({ type: 'harvest', memories: fresh, session_id: sessionId, dup_report: extractDupReport(acc) })
-          }
+          acc += decoder.decode()
+          // Full-save errors cannot interrupt the original automatic short-memory path.
+          try{window.dispatchEvent(new CustomEvent('ecolink:artifact-stream',{detail:JSON.stringify({raw:acc,sessionId,pagePath})}))}catch{}
+          if(!harvest||!settings.harvestEnabled)return
+          let text
+          try{text=streamText(acc)}catch{text=''}
+          harvestSource(text,sessionId,'源头')
+
         } catch { /* fail-open */ }
       })()
       return new Response(appBranch, { status: resp.status, statusText: resp.statusText, headers: resp.headers })

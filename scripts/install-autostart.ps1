@@ -1,59 +1,33 @@
-# 安装 dsh-ecolink 服务登录自启(隐藏窗口,无 UAC 弹窗)
+﻿# 安装 dsh-ecolink 服务登录自启(隐藏窗口,无 UAC 弹窗)
 # 用途:adapter 自动拉起之外的第二保险——不开 DSH、只在网页端用 ecolink 时服务也在。
 # 用法:右键"使用 PowerShell 运行",或:
 #   powershell -ExecutionPolicy Bypass -File D:\dsh\dsh-plugins\dsh-ecolink\scripts\install-autostart.ps1
+# 可加 -ServerPath <server.mjs 路径> 强制指定要跑哪一份。
 # 卸载:uninstall-autostart.ps1
+#
+# 2026-10-09 硬化:任务必须跑「adapter 的 serviceGuard 会拉起的那一份 server.mjs」——
+# 两份副本各带各的 config.json(端口先到先得)→ token/autoConfirm 漂移 → 记忆推入静默失败。
+# 解析顺序见 scripts/resolve-service-path.ps1(与 serviceGuard.js 的候选顺序一致)。
+
+param([string]$ServerPath = '')
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'dsh-ecolink-service'
-$serviceDir = Join-Path $PSScriptRoot '..\service'
-$serverPath = Join-Path $serviceDir 'server.mjs'
-if (-not (Test-Path $serverPath)) { Write-Error "找不到 $serverPath"; exit 1 }
+. "$PSScriptRoot\resolve-service-path.ps1"
+$serverPath = Resolve-EcolinkServerPath -ServerPath $ServerPath
+$serviceDir = Split-Path $serverPath -Parent
 $nodePath = (Get-Command node -ErrorAction Stop).Source
 $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-$xml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>dsh-ecolink memory bridge local service (hidden, logon autostart)</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-      <UserId>$me</UserId>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>$me</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <Enabled>true</Enabled>
-    <Hidden>true</Hidden>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>"$nodePath"</Command>
-      <Arguments>"$serverPath"</Arguments>
-      <WorkingDirectory>$serviceDir</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-"@
-$xmlFile = Join-Path $env:TEMP 'dsh-ecolink-task.xml'
-Set-Content -Path $xmlFile -Value $xml -Encoding Unicode
-schtasks /Create /TN $taskName /XML $xmlFile /F
-if ($LASTEXITCODE -ne 0) { Write-Error "schtasks 创建失败(exit $LASTEXITCODE)"; Remove-Item $xmlFile -ErrorAction SilentlyContinue; exit 1 }
-Remove-Item $xmlFile
-Write-Host "已安装登录自启任务 [$taskName](登录后自动以隐藏窗口启动,node: $nodePath)"
+# 用 Register-ScheduledTask 建任务:与原 XML 等价(隐藏窗口、无 UAC、登录触发、
+# IgnoreNew、无执行时限)。改用 cmdlet 而非 XML 文本块,避免静态引号检查把
+# here-string 的终止行误判成未闭合字符串。
+$action = New-ScheduledTaskAction -Execute $nodePath -Argument ('"' + $serverPath + '"') -WorkingDirectory $serviceDir
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
+$principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'dsh-ecolink memory bridge local service (hidden, logon autostart)' -Force | Out-Null
+Write-Host "已安装登录自启任务 [$taskName](登录后自动以隐藏窗口启动)"
+Write-Host "  node:   $nodePath"
+Write-Host "  server: $serverPath"
 schtasks /Query /TN $taskName

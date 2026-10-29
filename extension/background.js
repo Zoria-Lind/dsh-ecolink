@@ -71,8 +71,11 @@ let queue = null
 async function getQueue() {
   const cfg = await getConfig()
   if (!queue) {
-    const token = cfg.token || (await ensureToken()) || ''
-    queue = createOfflineQueue({ storage: storageApi, fetchImpl: fetch, bridgeUrl: cfg.bridgeUrl, token })
+    queue = createOfflineQueue({
+      storage: storageApi, fetchImpl: fetch, bridgeUrl: cfg.bridgeUrl,
+      token: async () => (await getConfig()).token || await ensureToken() || '',
+      refreshToken: () => ensureToken(true),
+    })
   }
   return queue
 }
@@ -275,6 +278,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           // 保证同一 SPA 页面里新开对话立刻用到最新记忆(否则等 45s 周期推送)
           const fresh = await getPool(true).catch(() => null)
           sendResponse({ ok: true, pool: fresh })
+          return
+        }
+
+        case 'artifact-save': {
+          const cfg = await getConfig()
+          const token = cfg.token || await ensureToken() || ''
+          const post = auth => fetch(`${cfg.bridgeUrl.replace(/\/$/, '')}/memory/artifact`, {
+            method: 'POST', signal: AbortSignal.timeout(10000),
+            headers: { 'Content-Type': 'application/json', 'X-Ecolink-Token': auth },
+            body: JSON.stringify({name:msg.name,content:msg.content,requestId:msg.requestId,expectedVersion:msg.expectedVersion}),
+          })
+          let response = await post(token)
+          if (response.status === 401) {
+            const fresh = await ensureToken(true)
+            if (fresh) response = await post(fresh)
+          }
+          const result = await response.json()
+          if (result.ok) poolCache = {at:0,data:null}
+          sendResponse(result)
           return
         }
         case 'manual-save': {

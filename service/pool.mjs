@@ -39,6 +39,11 @@ export function renderTimestamp(isoTs, precision = null) {
   return isoTs.slice(0, 16) // minute
 }
 
+// Same wire fingerprint as extension/core/entry.mjs (covered by contract tests).
+export function entryVersion(item) {
+  return createHash('sha256').update(JSON.stringify([item?.id ?? null,item?.key ?? null,item?.content ?? '',
+    item?.injectionPolicy === 'universal' ? 'universal' : 'manual',item?.kind ?? 'fact',item?.revision ?? null])).digest('hex')
+}
 const EMPTY_POOL = { version: 1, shared_pool: [], session_pools: {} }
 
 // ---- 快照与 diff(E3:变更角标/同步的基础;此前服务侧完全没有 hash/快照能力) ----
@@ -164,7 +169,7 @@ export function createPool(options = {}) {
 
   // 串行执行变更(所有写操作经此排队,防并发交错)
   function mutate(fn) {
-    const run = queue.then(() => { load(); const r = fn(); save(); return r })
+    const run = queue.then(() => { load(); const before = structuredClone(state); try { const r = fn(); save(); return r } catch (error) { state = before; throw error } })
     queue = run.catch(() => {})
     return run
   }
@@ -175,7 +180,7 @@ export function createPool(options = {}) {
     const cutoff = now - retentionDays * 86400e3
     const archived = []
     const keep = (item) => {
-      if (item.pinned) return true
+      if (item.pinned || item.kind === 'artifact' || item.injectionPolicy === 'universal') return true
       const ts = new Date(item.timestamp).getTime()
       const acc = item.last_accessed ? new Date(item.last_accessed).getTime() : 0
       // <= 而非 <:条目时间戳可能与 cutoff 同毫秒(实测抖动),同刻即视为到期
@@ -213,6 +218,7 @@ export function createPool(options = {}) {
       importance,
       pinned: !!pinned,
       last_accessed: null,
+      injectionPolicy: 'manual',
     }
   }
 
@@ -246,7 +252,7 @@ export function createPool(options = {}) {
       if (isBlocked(m.content)) { blocked += 1; continue }
       if (m.action === 'replace' && typeof m.id === 'string') {
         const target = findItem(m.id)
-        if (target) {
+        if (target && target.kind !== 'artifact') {
           target.content = m.content.trim()
           target.timestamp = new Date().toISOString()
           target.source = m.source ?? target.source
@@ -259,7 +265,7 @@ export function createPool(options = {}) {
       const key = typeof m.key === 'string' && m.key.trim().length > 0 ? m.key.trim() : null
       if (key) {
         const poolArr = sessionId ? (state.session_pools[sessionId]?.memories ?? []) : state.shared_pool
-        const existing = poolArr.find((it) => it.key === key)
+        const existing = poolArr.find((it) => it.key === key && it.kind !== 'artifact')
         if (existing) {
           // DSM 同款:同 key 同值跳过写入(防时间戳无意义翻新与重复计数)
           if (existing.content === m.content.trim()) continue
@@ -279,7 +285,7 @@ export function createPool(options = {}) {
       {
         const trimmed = m.content.trim()
         const allPools = [...state.shared_pool, ...Object.values(state.session_pools ?? {}).flatMap((sp) => sp.memories ?? [])]
-        if (allPools.some((it) => it.content === trimmed)) { deduped += 1; continue }
+        if (allPools.some((it) => it.kind !== 'artifact' && it.content === trimmed)) { deduped += 1; continue }
       }
       // 无 key 条目按内容去重:相同内容已存在则跳过
       // (模型回显示例会同一内容反复吐,池层是最后一道闸)
@@ -309,6 +315,49 @@ export function createPool(options = {}) {
   }
 
   return {
+
+    // Explicit metadata mutation is independent from text upsert/deduplication.
+    metadata({id,poolId,version,injectionPolicy}={}) {
+      return mutate(()=>{
+        const arr=poolId==='shared'?state.shared_pool:state.session_pools[poolId]?.memories
+        const found=(arr??[]).filter(it=>it.id===id)
+        if(found.length!==1) return {ok:false,error:'条目不存在或不唯一'}
+        const item=found[0]
+        if(!version || entryVersion(item)!==version) return {ok:false,conflict:true,error:'条目已变化，请刷新后重试'}
+        if(!['manual','universal'].includes(injectionPolicy)) return {ok:false,error:'类型无效'}
+        item.injectionPolicy=injectionPolicy
+        return {ok:true,id,version:entryVersion(item),injectionPolicy}
+      })
+    },
+    // Explicit artifact save bypasses short-fact trimming/harvest/blacklist/compression.
+    // requestId is stable across retry; same name requires the exact previewed version.
+    saveArtifact({name,content,requestId,expectedVersion}={}) {
+      return mutate(()=>{
+        if(typeof name!=='string'||!name.trim()||name.trim().length>200) return {ok:false,error:'名称须为1–200字符'}
+        if(typeof content!=='string'||!content.trim()||Buffer.byteLength(content,'utf8')>1500000) return {ok:false,error:'正文为空或超过1.5MB'}
+        if(typeof requestId!=='string'||!/^[a-zA-Z0-9_-]{8,100}$/.test(requestId)) return {ok:false,error:'缺少有效保存请求ID'}
+        const title=name.trim(), existing=state.shared_pool.find(it=>it.kind==='artifact'&&it.key===title)
+        const prior=existing&&[existing,...(existing.versions??[])].find(v=>v.requestId===requestId)
+        if(prior) {
+          if(prior.content!==content) return {ok:false,error:'保存请求ID已用于不同正文，请新建保存请求'}
+          return {ok:true,id:existing.id,revision:prior.revision,version:entryVersion(existing),duplicate:true}
+        }
+        if(existing&&expectedVersion!==entryVersion(existing))
+          return {ok:false,conflict:true,error:'已有同名完整成果；确认后保存新版本并保留旧版',id:existing.id,version:entryVersion(existing),revision:existing.revision}
+        const now=new Date().toISOString()
+        let item=existing
+        if(item) {
+          item.versions??=[]
+          item.versions.push({content:item.content,timestamp:item.timestamp,revision:item.revision,requestId:item.requestId})
+          item.content=content;item.timestamp=now;item.revision=(item.revision??1)+1;item.requestId=requestId
+        }else{
+          item={id:randomUUID(),key:title,content,timestamp:now,source:'web-artifact',kind:'artifact',revision:1,requestId,versions:[],
+            injectionPolicy:'manual',importance:'called',pinned:true,last_accessed:null}
+          state.shared_pool.push(item)
+        }
+        return {ok:true,id:item.id,revision:item.revision,version:entryVersion(item),retainedVersions:item.versions.length}
+      })
+    },
     poolFile,
     archiveFile,
     dir,
@@ -483,7 +532,7 @@ export function createPool(options = {}) {
       const push = (it, sessionId = null, identity = null) => {
         const ts = new Date(it.timestamp).getTime()
         // <= 与归档同语义:同毫秒即视为到期(days=0 时全部命中,测试用)
-        if (Number.isFinite(ts) && ts <= cutoff) out.push({ ...it, session_id: sessionId, identity })
+        if (it.kind !== 'artifact' && it.injectionPolicy !== 'universal' && Number.isFinite(ts) && ts <= cutoff) out.push({ ...it, session_id: sessionId, identity })
       }
       for (const it of state.shared_pool) push(it)
       for (const [sid, sp] of Object.entries(state.session_pools)) {
@@ -518,12 +567,12 @@ export function createPool(options = {}) {
         const pull = (arr, sessionId = null) => {
           for (let i = arr.length - 1; i >= 0; i--) {
             const ts = new Date(arr[i].timestamp).getTime()
-            if (Number.isFinite(ts) && ts <= cutoff) staged.push({ ...arr[i], session_id: sessionId })
+            if (arr[i].kind !== 'artifact' && arr[i].injectionPolicy !== 'universal' && Number.isFinite(ts) && ts <= cutoff) staged.push({ ...arr[i], session_id: sessionId })
           }
         }
         const keep = (arr, sessionId = null) => arr.filter((it) => {
           const ts = new Date(it.timestamp).getTime()
-          return !(Number.isFinite(ts) && ts <= cutoff)
+          return it.kind === 'artifact' || it.injectionPolicy === 'universal' || !(Number.isFinite(ts) && ts <= cutoff)
         })
         pull(state.shared_pool)
         state.shared_pool = keep(state.shared_pool)
@@ -560,6 +609,7 @@ export function createPool(options = {}) {
         // 全池内容去重:同内容保留首条(暂存条目先放回,新标签若内容一致则被吸收)
         const seen = new Set()
         const dedupe = (arr) => arr.filter((it) => {
+          if (it.kind === 'artifact' || it.injectionPolicy === 'universal') return true
           const c = String(it.content ?? '').trim()
           if (!c || seen.has(c)) return false
           seen.add(c)

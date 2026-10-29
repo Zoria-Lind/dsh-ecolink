@@ -1,3 +1,5 @@
+> **v0.3.0（2026-10-29）**：新增 `/memory/artifact` 完整成果存储（独立于短记忆，保留历史修订）、池条目的类型与时间排序、跨池分页读取。规则与限制见 [adapter/README.md](../adapter/README.md)。
+
 # dsh-ecolink-service
 
 dsh-ecolink 的本地记忆池服务:memory.json 的**唯一写者**,浏览器扩展经 localhost POST 推送记忆,DSH 适配层只读文件(PLAN.md §3.3 / §7)。

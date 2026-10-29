@@ -48,13 +48,13 @@ function stage(out, pkg, { main, exports, bin, files, dsh }) {
 // ① adapter 包:入口与 bundle 指向 adapter/ 子目录
 stage(OUT_ADAPTER, adapterPkg, {
   main: 'adapter/src/index.js',
-  exports: { '.': './adapter/src/index.js' },
+  exports: { '.': './adapter/src/index.js', './client': './adapter/src/client.js' },
   files: [
     'adapter/src', 'adapter/cordis.patch.yml', 'extension/core', 'service', 'README.md', 'LICENSE',
     // 2026-09-25:发布包绝不允许带本机配置(service/config.json 含真实 token;
     // config.json.bak-* 是本地备份)——发布事故级排除项
     '!service/config.json', '!service/config.json.bak-*', '!service/*.log',
-    '!service/test.mjs', '!service/fix-pool.mjs',
+    '!service/test.mjs', '!service/*.test.mjs', '!service/fix-pool.mjs',
   ],
   // 2026-10-02:合并包自身的 dsh 字段(compatibility 等)——此前硬编码只留 bundle.patch,
   // adapter/package.json 里加的 dsh.compatibility 在发布包里被静默丢掉
@@ -71,7 +71,7 @@ stage(OUT_SERVICE, servicePkg, {
     'service', 'extension/core', 'README.md', 'LICENSE',
     // 同 adapter:本机配置/日志/测试/一次性工具不出包
     '!service/config.json', '!service/config.json.bak-*', '!service/*.log',
-    '!service/test.mjs', '!service/fix-pool.mjs',
+    '!service/test.mjs', '!service/*.test.mjs', '!service/fix-pool.mjs',
   ],
 })
 cpSync(join(REPO, 'service/README.md'), join(OUT_SERVICE, 'README.md'))

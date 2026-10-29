@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "dsh-ecolink-web",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "打通 DeepSeek 网页版与本地 DSH 的记忆生态:网页端记住的 DSH 直接用,DSH 里产生的网页端也能读到。",
   "permissions": [
     "storage",
@@ -26,8 +26,19 @@
         "https://chat.deepseek.com/*"
       ],
       "js": [
+        "inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chat.deepseek.com/*"
+      ],
+      "js": [
         "content.js",
-        "panel.js"
+        "panel.js",
+        "artifact.js"
       ],
       "run_at": "document_start"
     }
@@ -35,7 +46,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "inject.js"
+        "inject.js",
+        "core/artifact.mjs"
       ],
       "matches": [
         "https://chat.deepseek.com/*"

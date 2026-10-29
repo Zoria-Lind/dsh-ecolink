@@ -21,11 +21,11 @@ const SERVICE_CONFIG = join(dirname(fileURLToPath(import.meta.url)), '../../../s
 function npmServiceConfig() {
   try {
     const req = createRequire(import.meta.url)
-    return join(dirname(req.resolve('@zoria-lind/dsh-ecolink-service/package.json')), 'service/config.json')
+    return join(dirname(req.resolve('@zoria-lind/dsh-ecolink-service')), 'config.json')
   } catch { return null }
 }
 
-function resolveServiceToken(config) {
+export function resolveServiceToken(config) {
   if (config.serviceToken) return config.serviceToken
   for (const cand of [SERVICE_CONFIG, npmServiceConfig()]) {
     if (!cand) continue
@@ -53,6 +53,7 @@ export function createMemoryWriteModule(ctx, config, stats, deps = {}) {
     if (token) headers['X-Ecolink-Token'] = token
     const resp = await fetchImpl(`${base}/memory/sync`, {
       method: 'POST',
+      signal: AbortSignal.timeout(8000),
       headers,
       body: JSON.stringify({ memories: contents.map((content) => ({ content, importance: 'called', source: 'dsh' })) }),
     })

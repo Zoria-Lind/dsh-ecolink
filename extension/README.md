@@ -1,3 +1,5 @@
+> **v0.3.0（2026-10-29）**：新增网页“保存完整成果”（命名、保留原文与历史版本、自动读取当前回答原文）、离线队列凭据刷新、对话原文读取。DSH 侧的规则与限制见 [adapter/README.md](../adapter/README.md)；下文原版架构说明仍然有效。
+
 # dsh-ecolink-web
 
 dsh-ecolink 的 Chrome/Edge MV3 扩展:在 chat.deepseek.com 钩住 `/api/v0/chat/completion`,

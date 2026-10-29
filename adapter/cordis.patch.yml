@@ -10,9 +10,9 @@
           injectEnabled: true
           singleInjection: true
           maxInjectionChars: 3000
-          # E1 通道分离:指令每轮幂等注入;内容默认不注入(按需 read,见 skill)
+          # 指令快照独立；正文只在新对话开局注入通用条目，或经侧栏显式排队
           instructionEnabled: true
-          contentInjectionEnabled: false   # 逃生舱:true 恢复旧的"改写用户消息注入记忆块"行为
+          contentInjectionEnabled: false   # 旧键兼容，不绕过类型策略
           skillName: 'ecolink-memory'      # E2 记忆 skill 注册名
           # E4 写回:/ecolink-push 经 service 的 POST /memory/sync 落盘(唯一写者)
           serviceUrl: 'http://127.0.0.1:17520'

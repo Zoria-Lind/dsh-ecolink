@@ -146,36 +146,6 @@ console.log('== 指令通道(E1 默认开) ==')
   check('instructionEnabled=false 无指令消息', d6.messages.length === 1)
 }
 
-console.log('== 内容通道逃生舱(E1 默认关) ==')
-{
-  const poolPath = makePoolFile()
-  const ctx = makeFakeCtx()
-  const stats = { bump() {}, addSample() {}, dispose() {}, snapshot() { return {} } }
-  const cfg = { ...resolveConfig({}).adapter, poolPath, contentInjectionEnabled: true }
-  createMemoryInjectModule(ctx, cfg, stats, { createUserMessage: fakeCreateUserMessage })
-
-  // 1) 旧行为:改写用户消息注入记忆块(指令通道同时保持)
-  const d1 = await ctx.emit('agent/pre-step', { agent: agentOf('b1', 'ds-b1'), signal: {} }, async () => ({ kind: 'enter', messages: [userMsg('帮我复习微积分补考')] }))
-  check('内容通道:用户消息被改写为记忆块', /\[dsh-ecolink 记忆\]/.test(txt(d1.messages[0].content)) && /微积分补考范围是前三章/.test(txt(d1.messages[0].content)))
-  check('内容通道:原文保留在块后', txt(d1.messages[0].content).endsWith('帮我复习微积分补考'))
-  check('内容+指令并存', d1.messages.length === 2 && /\[dsh-ecolink 指令\]/.test(txt(d1.messages[1].content)))
-
-  // 2) singleInjection:同会话第二条不再注入内容
-  const d2 = await ctx.emit('agent/pre-step', { agent: agentOf('b1', 'ds-b1'), signal: {} }, async () => ({ kind: 'enter', messages: [userMsg('继续复习')] }))
-  check('同会话内容不重复注入', txt(d2.messages[0].content) === '继续复习')
-
-  // 3) #记忆名 显式调用 → 只注入该会话记忆
-  const d3 = await ctx.emit('agent/pre-step', { agent: agentOf('b2', 'ds-b2'), signal: {} }, async () => ({ kind: 'enter', messages: [userMsg('#微积分补考 范围是什么')] }))
-  const t3 = txt(d3.messages[0].content)
-  check('#记忆名 注入指定会话记忆', /微积分补考范围是前三章/.test(t3))
-  check('#记忆名 不混入共享池', !/短标题/.test(t3))
-
-  // 4) 运行时上下文快照(source.kind='plugin')放行不改写
-  const runtime = { role: 'user', source: { kind: 'plugin:@deepseek-ai/dsh-system-prompt' }, content: 'Current runtime context.'.repeat(50) }
-  const d4 = await ctx.emit('agent/pre-step', { agent: agentOf('b3', 'ds-b3'), signal: {} }, async () => ({ kind: 'enter', messages: [runtime] }))
-  check('运行时上下文快照原样放行', d4.messages[0].content === runtime.content)
-}
-
 console.log('== 池缺失与降级 ==')
 {
   // 池不存在:指令通道照常(不依赖池);内容通道静默
@@ -247,20 +217,20 @@ console.log('== E9 diff 查看(/ecolink-diff)==')
   const cmd = ctx._registeredCommands[0]
   check('命令名/描述', cmd?.name === 'ecolink-diff' && typeof cmd?.description === 'string' && cmd.description.length > 0)
 
-  const first = await cmd.handler({})
+  const first = await cmd.handler({agent:agentOf('a','diff-session')})
   check('首次调用 → 全量 2 条', first.kind === 'success' && first.text.includes('2') && first.text.includes('记忆A') && first.text.includes('记忆B'))
 
-  const second = await cmd.handler({})
+  const second = await cmd.handler({agent:agentOf('a','diff-session')})
   check('无变化 → 无变化文案', second.kind === 'success' && second.text.includes('无变化'))
 
   poolData.shared_pool.push({ id: 'c1', key: 'k3', content: '记忆C' })
   poolData.shared_pool[0].content = '记忆A改'
   fileContent = JSON.stringify(poolData)
-  const third = await cmd.handler({})
+  const third = await cmd.handler({agent:agentOf('a','diff-session')})
   check('新增1+变更1 → diff 2 条', third.kind === 'success' && third.text.includes('2') && third.text.includes('记忆C') && third.text.includes('记忆A改'))
 
   fileContent = null
-  const broken = await cmd.handler({})
+  const broken = await cmd.handler({agent:agentOf('a','diff-session')})
   check('池文件损坏 → error 文案', broken.kind === 'error' && broken.text.includes('失败'))
 }
 
@@ -270,7 +240,7 @@ console.log('== E2 skill 运行时注册 ==')
   const dispose = apply(ctx, { adapter: { skillName: 'my-memory', serviceAutoStart: false } })
   check('skill 已注册', ctx._registeredSkills.length === 1)
   check('skill 名取自 skillName', ctx._registeredSkills[0]?.name === 'my-memory')
-  check('skill content 非空且含池路径', typeof ctx._registeredSkills[0]?.content === 'string' && ctx._registeredSkills[0].content.includes('memory.json'))
+  check('skill content 非空且含池路径', typeof ctx._registeredSkills[0]?.content === 'string' && ctx._registeredSkills[0].content.includes('ecolink_memory'))
   check('skill source=runtime', ctx._registeredSkills[0]?.source === 'runtime')
   check('skill description 非空', typeof ctx._registeredSkills[0]?.description === 'string' && ctx._registeredSkills[0].description.length > 0)
   dispose()
@@ -304,7 +274,7 @@ console.log('== 服务自动拉起(v1.1)==')
       serverPath: 'X:/fake/server.mjs',
     })
     const r = await guard.ensureService('test')
-    check('已活(401 也算)→ already-running 不 spawn', r === 'already-running' && spawns.length === 0)
+    check('已活(401 也算)→ already-running 不 spawn', r === 'occupied' && spawns.length === 0)
   }
 
   // 2) 未运行 → spawn 拉起,参数形状正确,就绪后不再起

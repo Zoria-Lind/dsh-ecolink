@@ -1,3 +1,5 @@
+> **v0.3.0（2026-10-29）**：新增指定全文读取（`/ecolink-list`、`/ecolink-read`、模型工具 `ecolink_memory`）、DSH 记忆侧栏与通用/非通用分类、网页“保存完整成果”。自动短标签继续独立收割和入池；全文读取不再要求手动复制。完整规则与限制见 [adapter/README.md](adapter/README.md)。
+
 # dsh-ecolink
 
 打通 **DeepSeek 网页版**与**本地 DSH** 的记忆生态:网页端记住的,DSH 直接用;DSH 里产生的,网页端也能读到。同一份结构化本地记忆池(`~/.dsh-memory/memory.json`)。
@@ -25,7 +27,7 @@ node dsh-ecolink/service/server.mjs
 dsh plugin --profile web add @zoria-lind/dsh-ecolink-adapter
 
 #    或本地路径(开发):
-#    dsh plugin --profile web add D:/dsh/dsh-plugins/dsh-ecolink/adapter
+#    dsh plugin --profile web add <仓库目录>/adapter
 ```
 
 服务默认 `http://127.0.0.1:17520`,零外部网络请求、零遥测;记忆数据只落在本机。

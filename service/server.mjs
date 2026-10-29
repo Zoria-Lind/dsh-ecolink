@@ -169,6 +169,15 @@ const server = createServer(async (req, res) => {
 
   try {
     // ---- POST ----
+    if (path === '/memory/metadata' && method === 'POST') {
+      const result = await pool.metadata(await readBody(req))
+      return send(res, result.ok ? 200 : (result.conflict ? 409 : 400), result)
+    }
+    if (path === '/memory/artifact' && method === 'POST') {
+      const result = await pool.saveArtifact(await readBody(req))
+      return send(res, result.ok ? 200 : (result.conflict ? 409 : 400), result)
+    }
+
     if (path === '/memory/sync' && method === 'POST') {
       const body = await readBody(req)
       const memories = Array.isArray(body.memories) ? body.memories : []

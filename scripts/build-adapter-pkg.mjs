@@ -33,11 +33,11 @@ const pkg = {
   license: adapterPkg.license,
   type: 'module',
   main: 'adapter/src/index.js',
-  exports: { '.': './adapter/src/index.js' },
-  files: ['adapter/src', 'adapter/cordis.patch.yml', 'extension/core', 'service', 'README.md', 'LICENSE'],
+  exports: { '.': './adapter/src/index.js', './client': './adapter/src/client.js' },
+  files: ['adapter/src', 'adapter/cordis.patch.yml', 'extension/core', 'service', 'README.md', 'LICENSE', '!service/config.json', '!service/config.json.bak-*', '!service/*.log', '!service/test.mjs', '!service/*.test.mjs', '!service/fix-pool.mjs'],
   engines: adapterPkg.engines,
   repository: { type: 'git', url: 'git+https://github.com/Zoria-Lind/dsh-ecolink.git' },
-  dsh: { bundle: { patch: './adapter/cordis.patch.yml' } },
+  dsh: { ...(adapterPkg.dsh ?? {}), bundle: { patch: './adapter/cordis.patch.yml' } },
   keywords: adapterPkg.keywords,
 }
 writeFileSync(join(OUT, 'package.json'), JSON.stringify(pkg, null, 2) + '\n', 'utf8')

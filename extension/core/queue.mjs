@@ -3,7 +3,7 @@
 // 序列化:入队与 flush 的「读-裁-写」都串到同一条 promise 链上(队列变更单一执行者),
 // 网络调用保持在链外(退避等待不能卡链)。并发 push 不丢条目,失败保序不越队。
 
-export function createOfflineQueue({ storage, fetchImpl, bridgeUrl, token = '', maxRetries = 6, baseDelayMs = 1000 }) {
+export function createOfflineQueue({ storage, fetchImpl, bridgeUrl, token = '', refreshToken, maxRetries = 6, baseDelayMs = 1000 }) {
   const KEY = 'ecolink_outbox'
   let flushing = false
   let chain = Promise.resolve()
@@ -18,14 +18,15 @@ export function createOfflineQueue({ storage, fetchImpl, bridgeUrl, token = '', 
   }
 
   async function postToBridge(entry) {
-    const headers = { 'Content-Type': 'application/json' }
-    if (token) headers['X-Ecolink-Token'] = token
-    const resp = await fetchImpl(`${bridgeUrl.replace(/\/$/, '')}/memory/${entry.kind === 'session' ? 'session' : entry.kind === 'touch' ? 'touch' : 'sync'}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(entry.payload),
-    })
-    if (!resp.ok) throw new Error(`bridge ${resp.status}`)
+    const body = JSON.stringify(entry.payload)
+    const send = async value => {
+      const headers = { 'Content-Type': 'application/json' }
+      if (value) headers['X-Ecolink-Token'] = value
+      return fetchImpl(bridgeUrl.replace(/\/$/, '')+'/memory/'+(entry.kind === 'session' ? 'session' : entry.kind === 'touch' ? 'touch' : 'sync'), {method:'POST', headers, body})
+    }
+    let resp = await send(typeof token === 'function' ? await token() : token)
+    if (resp.status === 401 && refreshToken) resp = await send(await refreshToken())
+    if (!resp.ok) throw new Error('bridge '+resp.status)
     return resp.json()
   }
 

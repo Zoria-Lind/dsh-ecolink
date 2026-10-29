@@ -1,86 +1,45 @@
 # dsh-ecolink-adapter
 
-dsh-ecolink 的 DSH 适配层(v1):直读本地记忆池(`~/.dsh-memory/memory.json`,只读),
-经 `agent/pre-step` 维持 DSM:memory_write 指令通道(E1),提供 `/ecolink-push` 显式写回(E4)
-与记忆 skill 按需读取(E2),打通"网页端记住 → DSH 直接用;DSH 产出 → 网页端可用"。
+v0.3.0 起提供指定全文读取、记忆侧栏与通用/非通用分类、网页完整成果保存。仅对 DSH `0.2.1-rc.2` 的公开宿主接口做过验证，`dsh.compatibility` 也只声明该版本。发布包需由仓库根目录的 `scripts/build-npm-pkgs.mjs` 生成镜像布局，不能直接把 adapter 子目录当作完整包。
 
-> **v0.1.1 变更摘要(E0–E8)**:离线队列并发丢条目修复(E0,extension/core/queue.mjs);
-> 指令/内容通道分离——指令每轮幂等注入(plugin 快照消息,不改写用户消息、不碰前缀缓存),
-> 内容默认不注入、由 skill 按需 read,`contentInjectionEnabled` 为逃生舱(E1);
-> 记忆 skill `ecolink-memory` 运行时注册(E2);服务端快照/hash/diff 三端点(E3);
-> `/ecolink-push` 写回(复用 /memory/sync,source:'dsh',service 唯一写者)(E4);
-> 建议确认队列(sync 进队列、确认才入池;未确认条目不进 DSH 上下文)(E5);
-> 网页端只读面板 + chrome.alarms badge(E6);静音 + 黑名单(E7);服务默认安全(E8)。
->
-> **v0.2.0(2026-09-25,与 service/extension 同号发布)**:压缩体系重构在 service/扩展侧
-> (事务暂存池 → 模型自报重复数动态下限 → 提交/回滚,详见 service/README.md);
-> adapter 侧:install 方式改为 npm 包安装(`dsh plugin add @zoria-lind/dsh-ecolink-adapter`),
-> bundle patch 的 `name` 已改为 scoped 包名(修复 npm 安装 `cannot resolve package`)。
->
-> **v1.1(2026-09-14)**:service 自动拉起——探测到 17520 未监听就本机 spawn 拉起
-> (apply + pre-step 60s 节流;仅本地 URL;`serviceAutoStart` 默认开)。E5 设计纠正:
-> 确认点改到 DSH 侧(待实现),随仓 config.json 设 `autoConfirm: true`,网页收割直入池。
+## 指定读取
 
-## 安装
+- `/ecolink-list 搜索词`：目录和短摘要。
+- `/ecolink-read 完整条目名称`：存储正文；同名先返回候选。
+- `/ecolink-read {"ref":"目录返回的ref","version":"返回版本","offset":0,"limit":2000}`：按 `nextOffset` 续读，直到 null。名称中有空格和中文也支持。
+- 模型工具 `ecolink_memory` 提供相同的 `list` / `read`，注册在当前 agent 自有工具层；optimizer 懒加载时仍保留。
+- `/ecolink-diff`：只推进本对话已显示的变化目录，不把摘要当全文；其他对话有独立进度。
 
-```bash
-# npm 安装(0.2.0 起推荐)
-dsh plugin --profile web add @zoria-lind/dsh-ecolink-adapter
+池名用于分组，条目名称/key、ID 和 ref 用于定位内容。目录最多20条，正文每页最多4000个 Unicode 码点；分页期间内容变化会要求刷新版本。
 
-# 或本地路径(开发)
-dsh plugin --profile web add D:/dsh/dsh-plugins/dsh-ecolink/adapter
+## DSH 侧栏
+
+在原生右侧栏选择“记忆池”，搜索、预览、翻页、注入。面板捕获其所属对话 ID，切换对话后丢弃过期响应。点击只将选定快照排入该对话，不自动发起新模型请求；状态区分“待进入上下文”和“已进入上下文”。
+
+旧记忆和新建普通记忆默认非通用。通用只在新对话第一次构建上下文时选择并保存快照；改成通用不追补当前或已存在的对话。改回非通用只影响后续对话，不撤回已经进入上下文的内容。恢复、分支和重复点击通过宿主会话记录去重。元数据修改由现有 ecolink-service 唯一写入，并校验版本。
+
+`adapter.enabled` 为总开关，`injectEnabled` 控制新对话通用自动注入，`instructionEnabled` 控制短记忆指令；显式点击单独处理。`maxInjectionChars` 为每步参考资料预算（默认3000，包含来源包装）。全文超预算会明确拒绝，可选择标明范围的当前页；开局超预算的通用条目显示遗漏数量。旧 `contentInjectionEnabled` 保留读取兼容但不再启用旧式自动选文，避免绕过分类。
+
+池文件只读，地址来自 `poolPath`；服务 URL 与 token 由后端配置使用，浏览器侧不接收文件路径或凭据。服务不可用时仍可读取已有池文件，类型修改失败明确提示。注入排队必须取得宿主持久化确认，失败保留待处理记录并允许重试。首次注入所需宿主接口不可用时不会假报成功。
+
+## 网页完整成果
+
+回答正文旁的“保存完整成果”打开命名编辑框，排除思考区。匹配完整原始流会自动预填；旧回答或扩展更新前的回答会自动读取当前对话历史原文。按回答 ID 或完整文本对应，不用前缀或最近一条猜测。复杂排版无法唯一对应时，可从当前对话已读取的回答列表中选择并核对全文，无需手动复制；读取失败可重试，正文为空不能保存。历史原文来自网页已登录的同源只读接口，不产生模型请求；未知或截断协议不假报完整。
+
+原有自动短标签功能继续独立工作：记忆写入说明、流式/历史/DOM 收割和离线入池均保留。源流先解码 JSON 再拼接跨片段标签；离线队列在凭据过期时只刷新重试一次，失败保留待发内容。全文捕获异常不应阻断短标签。Chrome/Edge 更新时都须重载既有扩展并刷新网页，才能加载新 MAIN world 拦截器。
+
+保存保留空白、Markdown、代码和标签字面量，正文上限1.5MB；目录摘要和自动短记忆独立。完整成果默认非通用且不参与自动短记忆筛选或压缩。同名保存须确认并校验旧版本；服务保留历史全文，当前面板读取最新版本，暂未提供旧版本浏览界面。断网/失败不会报成功或清空编辑框；同一内容重试采用相同请求 ID 防重复。关闭页面前未保存的编辑内容需要自行保留。
+
+## 验收
+
+所有命令必须在隔离 HOME、临时目录和虚构池下运行，不能用真实记忆测试：
+
+```powershell
+node adapter/test/smoke.mjs
+node --test adapter/test/iteration.mjs adapter/test/ui.mjs
+node --test extension/test/core.test.mjs extension/test/artifact.test.mjs
+node service/test.mjs
+node --test service/iteration.test.mjs
 ```
 
-## 机制
-
-- **只读池文件**:mtime 缓存(文件变化立即重读,TTL 5s 兜底);唯一写者是 ecolink-service
-- **指令通道(E1,默认开)**:每轮 pre-step 末尾追加一条 `source.kind='plugin'` 的
-  `[dsh-ecolink 指令]` 快照消息(照抄内核 dsh-time-context 形态:prepend 注册 + await next +
-  createUserMessage;决策里的 messages 只喂本步请求、不写会话事件)。剥旧追加 → 每轮幂等不叠加
-- **内容通道(E1,默认关)**:`contentInjectionEnabled: true` 恢复旧行为——改写用户消息注入
-  记忆块(2-gram 打分 + 时间衰减 + 预算 + 长提示词缩减 + singleInjection 会话去重)
-- **`/ecolink-push`(E4)**:斜杠命令,把指定要点 POST 到 service 的 `/memory/sync`
-  (source:'dsh');token 未配置时自动读同仓 `service/config.json`;service 是唯一写者
-- **记忆 skill(E2)**:注册 `ecolink-memory`,指引模型用 read 按需读池原文(引用前必须核对)
-- **service 自动拉起(v1.1)**:apply 时与每次 pre-step(60s 节流)探测 `serviceUrl/memory/status`;
-  任何 HTTP 响应(含 401)= 已活;网络错误 = 未运行 → spawn 同仓 `service/server.mjs`
-  (detached + 无窗口)。仅对 127.0.0.1/localhost/::1 生效;service 目录缺失(独立发布包)静默跳过。
-  与登录自启任务兼容:端口已监听就不会重复起
-- **fail-open**:池不存在/读失败/任何异常 → 静默放行,绝不破坏请求
-- 只处理 `source.kind='user'` 的真实用户消息(DSH runtime-context 快照直接放行)
-
-## 配置(cordis.patch.yml)
-
-```yaml
-adapter:
-  enabled: true
-  poolPath: '~/.dsh-memory/memory.json'
-  poolTtlMs: 5000
-  injectEnabled: true            # 总开关(false = 两个通道全关)
-  singleInjection: true          # 内容通道专用(指令通道天然每轮幂等)
-  maxInjectionChars: 3000        # 内容通道注入预算
-  instructionEnabled: true       # E1 指令通道
-  contentInjectionEnabled: false # E1 内容逃生舱
-  skillName: 'ecolink-memory'    # E2 skill 注册名
-  serviceUrl: 'http://127.0.0.1:17520' # E4 写回目标
-  serviceToken: ''               # E4;留空自动读同仓 service/config.json(E8 自动生成)
-  serviceAutoStart: true         # v1.1;探测到服务未运行就自动拉起(仅本地 URL 生效)
-```
-
-## 测试
-
-```bash
-node adapter/test/smoke.mjs   # 76 项,零 API
-```
-
-## 已知限制
-
-- 会话过滤靠 `#记忆名` 显式调用;DSH CLI 的 `--resume <session>` 只接受会话 id,
-  "按命名会话自动绑定"待 DSH 提供 `--session` 能力后再做
-- 与 token-optimizer / behavior-enhancer 的联动开关(两插件中 `memory_bridge` 占位节)
-  待适配层稳定后启用
-- `inject.js` 仍是经典脚本,INSTRUCTION_PROMPT/BLOCK_RE 等与 core/*.mjs 镜像维护
-  (注释锁死);彻底消除镜像需要构建期注入(P5/0D 结论)
-- npm 发布口径(0.1.3 起已解决):`src/modules/memoryInject.js` 跨目录 import `extension/core/*`,
-  发布时经 `scripts/build-npm-pkgs.mjs` 生成镜像仓库布局的 staging 包
-  (adapter/+extension/core/+service/ 平铺),发布前必须 `npm pack` 解包实测 import 链
+宿主夹具来自已记录 SHA256 的安装版本；测试复用实际 Session、工具参数校验、pre-step 与 flush 代码，其余运行环境为测试协作者。UI 验收执行实际组件/事件代码，但使用最小 DOM/React 替身，不等于真实桌面浏览器验收。没有真实模型调用、费用或省 token 收益测量。
