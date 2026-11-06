@@ -37,7 +37,13 @@ function integer(value, fallback, max) {
 }
 export function createMemoryReader(config, deps={}) {
   const readFile=deps.readFile ?? (p=>readFileSync(p,'utf8'))
-  const entries=()=>flattenPool(JSON.parse(readFile(expandHome(config.poolPath))))
+  function entries() {
+    try { return flattenPool(JSON.parse(readFile(expandHome(config.poolPath)))) }
+    catch (error) {
+      if (error?.code === 'ENOENT') return []
+      throw error
+    }
+  }
   function select(args={}) {
     let all=entries()
     if (args.pool) {

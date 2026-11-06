@@ -9,19 +9,22 @@ import {DEFAULT_CONFIG} from '../../extension/core/config.mjs'
 import {createPool} from '../../service/pool.mjs'
 import {artifactPayload,decodeArtifactStream,decodeArtifactHistory,matchArtifactSource,pageArtifactMarkdown} from '../../extension/core/artifact.mjs'
 const settle=async()=>{for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r))}
-function desktop(){const registrations=new Map(),opened=[];let definition,Panel,plugin,cursor=0,pending=[],store=[],effects=[],tree,props={sessionId:'A'};const requests=[]
+function desktop({inputActions,desktopBridge}={}){const registrations=new Map(),opened=[];let definition,Panel,plugin,cursor=0,pending=[],store=[],effects=[],tree,props={sessionId:'A'};const requests=[]
  const React={createElement:(tag,attrs,...children)=>({tag,attrs:attrs??{},children:children.flat(Infinity).filter(v=>v!==null&&v!==false&&v!==undefined)}),
  useState(init){const i=cursor++;store[i]??={value:init};return[store[i].value,v=>{store[i].value=typeof v==='function'?v(store[i].value):v}]},
  useRef(init){const i=cursor++;return store[i]??(store[i]={current:init})},
  useEffect(fn,deps){const i=cursor++;if(!effects[i]||deps.some((v,n)=>v!==effects[i].deps[n])){pending.push(()=>{effects[i]?.dispose?.();effects[i]={deps,dispose:fn()}})}}}
  const fetch=(url,options={})=>new Promise(resolve=>{requests.push({args:options.method==='POST'?JSON.parse(options.body):Object.fromEntries(new URL('http://synthetic/'+url).searchParams),options,resolve:v=>resolve({ok:true,json:async()=>v})})})
- const ctx={effect:fn=>fn(),sidebarRight:{openTab:kind=>opened.push(kind)},sidebarRightTabs:{register:d=>{definition=d;return()=>{}}},slots:{inject:(_n,fn)=>fn(),register:(d,component)=>{registrations.set(d.name,{definition:d,component});if(d.name==='sidebar.right.pane.tab')Panel=component;return()=>{}}}}
- vm.runInNewContext(readFileSync(new URL('../src/client.js',import.meta.url),'utf8'),{window:{__ModuleLoader__:{load:d=>{assert.equal(d.id,'@zoria-lind/dsh-ecolink-adapter');plugin=d.factory(n=>{assert.equal(n,'react');return React})}}},fetch,URLSearchParams,AbortController,setInterval:()=>1,clearInterval:()=>{}})
+ const styles=[]
+ const document={createElement:()=>({remove(){styles.splice(styles.indexOf(this),1)}}),head:{appendChild:style=>styles.push(style)}}
+ const disposers=[]
+ const ctx={effect:fn=>disposers.push(fn()),sidebarRight:{openTab:kind=>opened.push(kind)},sidebarRightTabs:{register:d=>{definition=d;return()=>{}}},slots:{inject:(_n,fn)=>fn(),register:(d,component)=>{registrations.set(d.name,{definition:d,component});if(d.name==='sidebar.right.pane.tab')Panel=component;return()=>{}}}}
+ vm.runInNewContext(readFileSync(new URL('../src/client.js',import.meta.url),'utf8'),{window:{dshDesktop:desktopBridge,__ModuleLoader__:{load:d=>{assert.equal(d.id,'@zoria-lind/dsh-ecolink-adapter');plugin=d.factory(n=>{assert.equal(n,'react');return React})}}},document,fetch,URLSearchParams,AbortController,setInterval:()=>1,clearInterval:()=>{}})
  plugin.apply(ctx)
- const render=(sessionId=props.sessionId)=>{props={sessionId};cursor=0;tree=Panel(props);const work=pending;pending=[];work.forEach(fn=>fn());return tree}
+ const render=(sessionId=props.sessionId)=>{props={sessionId,inputActions};cursor=0;tree=Panel(props);const work=pending;pending=[];work.forEach(fn=>fn());return tree}
  const nodes=(value=tree)=>typeof value==='object'&&value?[value,...(value.children??[]).flatMap(v=>nodes(v))]:[]
  const click=text=>{const node=nodes().find(n=>n.tag==='button'&&n.children[0]===text);assert.ok(node,text);return node.attrs.onClick()}
- return{render,requests,click,nodes,registrations,opened,openHeader(){const entry=registrations.get('conversation.session.header.utilities');assert.ok(entry,'native session header entry');entry.component(entry.definition.inject()).attrs.onClick()},get definition(){return definition},dispose:()=>effects.forEach(e=>e?.dispose?.())}
+ return{render,requests,click,nodes,registrations,opened,styles,openHeader(){const entry=registrations.get('conversation.session.header.utilities');assert.ok(entry,'native session header entry');const button=entry.component(entry.definition.inject());button.attrs.onClick();return button},get definition(){return definition},dispose:()=>{effects.forEach(e=>e?.dispose?.());disposers.reverse().forEach(dispose=>dispose?.())}}
 }
 test('actual desktop component keeps captured target/version, ignores stale previews/status after switching, and registers native sidebar type',async()=>{
  const ui=desktop();assert.equal(ui.definition.kind,'ecolink-memory');ui.openHeader();assert.deepEqual(ui.opened,['ecolink-memory']);ui.render('A')
@@ -30,6 +33,34 @@ test('actual desktop component keeps captured target/version, ignores stale prev
  const oldPreview=ui.requests.find(r=>r.args.action==='read');ui.render('B');oldPreview.resolve({content:'A的正文',offset:0,totalChars:4,nextOffset:null,partial:false});ui.requests.find(r=>r.args.action==='status'&&r.args.sessionId==='A').resolve({items:[{ref:'A的状态',token:'A',status:'pending'}],omitted:0});await settle();ui.render();assert.equal(JSON.stringify(ui.nodes()).includes('A的正文'),false);assert.equal(JSON.stringify(ui.nodes()).includes('A的状态'),false)
  const bList=ui.requests.filter(r=>r.args.action==='list').at(-1);bList.resolve({total:1,offset:0,nextOffset:null,items:[item]});await settle();ui.render();ui.click('条目 · 非通用');ui.requests.filter(r=>r.args.action==='read').at(-1).resolve({content:'正文',offset:0,totalChars:2,nextOffset:null,partial:false});await settle();ui.render();const mutation=ui.click('注入全文');const inject=ui.requests.find(r=>r.args.action==='inject');assert.equal(inject.args.sessionId,'B');assert.equal(inject.args.version,'v1');ui.render('C');inject.resolve({items:[{ref:'B的结果',token:'B',status:'pending'}],omitted:0});await mutation;ui.render();assert.equal(JSON.stringify(ui.nodes()).includes('B的结果'),false);ui.dispose()
 })
+test('draft handoff inserts full text only in the current chat and never submits',async()=>{
+ const inserted=[],span={start:4,end:4,draftRev:3},inputActions={captureInsertion:()=>span,
+  insertText:(...args)=>{inserted.push(args);return true},submit:()=>assert.fail('draft handoff must not submit')}
+ const ui=desktop({inputActions,desktopBridge:{browser:{acquireEcolink:()=>{}}}})
+ assert.ok(ui.registrations.has('shell.overlay'));ui.render('A')
+ const item={id:'1',key:'草稿正文',ref:'draft-ref',version:'v1',pool:'共享池',chars:6,injectionPolicy:'manual'}
+ ui.requests.find(r=>r.args.action==='list').resolve({total:1,offset:0,nextOffset:null,items:[item]})
+ await settle();ui.render();ui.click('草稿正文 · 非通用')
+ const full='正文\n\n结尾'
+ ui.requests.find(r=>r.args.action==='read').resolve({content:full,offset:0,totalChars:6,nextOffset:null,version:'v1'})
+ await settle();ui.render()
+ const prior=ui.nodes().find(n=>n.tag==='button'&&n.children[0]==='带入草稿')
+ assert.ok(prior);prior.attrs.onClick()
+ assert.deepEqual(inserted,[[full,span]])
+ ui.render('B');prior.attrs.onClick()
+ assert.equal(inserted.length,1);assert.equal(ui.requests.some(r=>r.options.method==='POST'),false);ui.dispose()
+})
+
+test('header button uses scoped transparent styling and releases its stylesheet',()=>{
+ const ui=desktop();const button=ui.openHeader()
+ assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.equal(button.attrs['aria-label'],'打开记忆池')
+ assert.equal(button.attrs.className,'ecolink-header-button');assert.equal(button.attrs.style,undefined)
+ assert.equal(ui.styles.length,1)
+ assert.match(ui.styles[0].textContent,/\.ecolink-header-button\s*\{[^}]+background: transparent;/)
+ assert.match(ui.styles[0].textContent,/\.ecolink-header-button:focus-visible\s*\{[^}]+outline: 2px/)
+ ui.dispose();assert.equal(ui.styles.length,0)
+})
+
 test('native header entry is available for an existing chat and full text loads across Unicode pages without injecting',async()=>{
  const ui=desktop();ui.render('existing-chat');ui.openHeader();assert.deepEqual(ui.opened,['ecolink-memory'])
  const chars=Array.from('开头'+('😀中文'.repeat(3000))+'结尾'),full=chars.join('')

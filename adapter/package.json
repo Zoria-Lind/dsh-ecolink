@@ -1,6 +1,6 @@
 {
   "name": "@zoria-lind/dsh-ecolink-adapter",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "DSH 跨端记忆：指定全文读取、侧栏浏览与注入、通用/非通用分类",
   "license": "MIT",
   "type": "module",
@@ -25,9 +25,9 @@
       "patch": "./cordis.patch.yml"
     },
     "compatibility": {
-      "dsh": "0.2.1-rc.2",
+      "dsh": "0.2.2-rc.1",
       "dshReleases": {
-        "0.2.1-rc.2": "compatible"
+        "0.2.2-rc.1": "compatible"
       }
     },
     "client": {
@@ -49,6 +49,7 @@
     "directory": "adapter"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.0.0",
+    "dsh": "0.2.2-rc.1"
   }
 }

@@ -2,6 +2,49 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
   const React=require('react'), h=React.createElement
   const KIND='ecolink-memory', PAGE=1500
   const control={color:'inherit',background:'var(--dsw-alias-bg-layer-2, transparent)',border:'1px solid var(--dsw-alias-border-l2, #8886)',borderRadius:6,padding:'5px 8px'}
+  const HEADER_BUTTON_CSS = `
+    .ecolink-header-button {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      height: 28px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--dsw-alias-label-secondary, inherit);
+      font: inherit;
+      font-size: 12px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .ecolink-header-button:hover,
+    .ecolink-header-button:focus-visible {
+      background: var(--dsw-alias-interactive-bg-hover, #8882);
+      color: var(--dsw-alias-label-primary, inherit);
+    }
+    .ecolink-header-button:focus-visible {
+      outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
+      outline-offset: 2px;
+    }
+    .ecolink-switch {
+      position: fixed;
+      inset: 6px auto auto 152px;
+      z-index: 1800;
+      -webkit-app-region: no-drag;
+      app-region: no-drag;
+    }
+    .ecolink-web-surface {
+      position: fixed;
+      inset: 40px 0 0;
+      z-index: 1799;
+      background: var(--dsw-alias-bg-layer-1, Canvas);
+    }
+    .ecolink-web-surface[hidden] { display: none; }
+    .ecolink-web-guest, .ecolink-web-guest webview { width: 100%; height: 100%; }
+    .ecolink-web-error { position: absolute; top: 8px; left: 20px; }
+  `
   async function api(args,method='GET',signal) {
     const path='api/ecolink'
     const response=await fetch(method==='GET'?`${path}?${new URLSearchParams(args)}`:path,
@@ -12,7 +55,7 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
     const date=new Date(value)
     return value && Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{hour12:false}):'时间未知'
   }
-  function Panel({sessionId}) {
+  function Panel({sessionId,inputActions}) {
     const [q,setQ]=React.useState(''),[page,setPage]=React.useState(null),[selected,setSelected]=React.useState(null),
       [read,setRead]=React.useState(null),[state,setState]=React.useState(null),[message,setMessage]=React.useState(''),[busy,setBusy]=React.useState(false),
       [loading,setLoading]=React.useState(false),[offset,setOffset]=React.useState(0),[policy,setPolicy]=React.useState('all')
@@ -66,6 +109,11 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
       }catch(e){if(active.current===target)setMessage(e.message)}finally{if(active.current===target)setBusy(false)}
     }
     const button=(text,onClick,disabled=false)=>h('button',{type:'button',onClick,disabled:busy||disabled,style:{...control,margin:'3px'}},text)
+    const insertDraft=()=>{
+      if(!read?.complete||active.current!==selected?.sessionId||!inputActions?.captureInsertion)return
+      const ok=inputActions.insertText(read.content,inputActions.captureInsertion())
+      setMessage(ok?'已带入当前对话草稿。':'当前草稿暂时无法编辑，请稍后重试。')
+    }
     const refresh=()=>{clearPreview();setMessage('');list()}
     const filter=value=>{setPolicy(value);clearPreview();setMessage('');setPage(null);list(0,undefined,value)}
     const detail=()=>h('section',{'aria-label':'记忆完整正文','aria-busy':busy,style:{padding:'8px 0'}},
@@ -76,6 +124,7 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
       ...(state?.items??[]).filter(i=>i.ref===selected?.ref&&i.version===selected?.version).map(i=>h('p',{key:i.token,role:'status'},i.status==='admitted'?'这条记忆已进入当前对话上下文':`这条记忆已排队${i.partial?'（所选分段）':''}，下次发送时注入当前对话`)),
       read?.complete&&h('div',null,
         button('注入全文',()=>mutate('inject'),!sessionId),
+        window.dshDesktop?.browser?.acquireEcolink&&inputActions?.insertText&&button('带入草稿',insertDraft,!sessionId),
         button(selected.injectionPolicy==='universal'?'改为非通用':'改为通用',()=>mutate('policy')),
         read.totalChars>PAGE&&h('details',null,h('summary',null,'长文分段注入'),
           h('p',null,`当前段 ${offset+1}–${Math.min(offset+PAGE,read.totalChars)} / ${read.totalChars} 字`),
@@ -102,10 +151,70 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
       state&&h('div',null,state.notice,state.omitted>0&&h('p',null,`开局超预算未注入 ${state.omitted} 条`),
         ...state.items.map(i=>h('div',{key:i.token},`${i.status==='admitted'?'已进入上下文':'待注入'}${i.partial?'（部分正文）':''} · ${i.ref}`))))
   }
+  function DeepSeekSwitch() {
+    const bridge=window.dshDesktop?.browser
+    const [shown,setShown]=React.useState(false),[started,setStarted]=React.useState(false)
+    const [error,setError]=React.useState('')
+    const host=React.useRef(null)
+    React.useEffect(()=>{
+      if(!started||!bridge?.acquireEcolink)return
+      let disposed=false,lease,guest
+      const target=host.current
+      const failure=()=>{if(!disposed)setError('DeepSeek 网页加载失败。可切回 Harness 后重新打开应用再试。')}
+      async function mount(){
+        const reservation=await bridge.acquireEcolink()
+        lease=reservation.lease
+        if(disposed){await bridge.release(lease);return}
+        guest=document.createElement('webview')
+        guest.dataset.sidebarBrowserFrame='webview'
+        guest.setAttribute('aria-label','DeepSeek 网页')
+        guest.setAttribute('name',lease)
+        guest.setAttribute('partition',reservation.partition)
+        guest.setAttribute('src','about:blank#'+lease)
+        guest.addEventListener('dom-ready',()=>{
+          if(!disposed)guest.loadURL('https://chat.deepseek.com/').catch(failure)
+        },{once:true})
+        guest.addEventListener('did-fail-load',event=>{
+          if(event.isMainFrame&&event.errorCode!==-3)failure()
+        })
+        guest.addEventListener('did-finish-load',()=>{
+          if(!disposed)setError('')
+        })
+        target.append(guest)
+      }
+      mount().catch(failure)
+      return ()=>{
+        disposed=true
+        guest?.remove()
+        if(lease)bridge.release(lease).catch(()=>{})
+      }
+    },[started,bridge])
+    if(!bridge?.acquireEcolink)return null
+    const toggle=()=>{
+      if(!started)setStarted(true)
+      setShown(!shown)
+    }
+    return h(React.Fragment,null,
+      h('button',{type:'button',className:'ecolink-header-button ecolink-switch','aria-pressed':shown,
+        title:shown?'返回当前 Harness 对话':'在当前窗口打开 DeepSeek 网页',onClick:toggle},
+        shown?'返回 Harness':'DeepSeek 网页'),
+      started&&h('section',{className:'ecolink-web-surface',hidden:!shown,'aria-label':'内嵌 DeepSeek 网页'},
+        h('div',{ref:host,className:'ecolink-web-guest'}),
+        error&&h('p',{className:'ecolink-web-error',role:'alert'},error)))
+  }
   function OpenMemory({openMemory}) {
-    return h('button',{type:'button',onClick:openMemory,title:'浏览完整记忆并注入当前对话','aria-label':'打开记忆池',style:control},'记忆池')
+    return h('button',{type:'button',onClick:openMemory,title:'浏览完整记忆并注入当前对话','aria-label':'打开记忆池',className:'ecolink-header-button'},'记忆池')
   }
   return {inject:['slots','sidebarRightTabs','sidebarRight'],apply(ctx){
+    ctx.effect(()=>{
+      const style=document.createElement('style')
+      style.textContent=HEADER_BUTTON_CSS
+      document.head.appendChild(style)
+      return ()=>style.remove()
+    })
+    if(window.dshDesktop?.browser?.acquireEcolink)ctx.effect(()=>ctx.slots.inject('shell.overlay',()=>ctx.slots.register({
+      name:'shell.overlay',id:'ecolink-deepseek-switch'
+    },DeepSeekSwitch)))
     ctx.effect(()=>ctx.sidebarRightTabs.register({id:KIND,kind:KIND,title:()=> '记忆池',
       guide:[{id:'ecolink',order:50,title:()=> '记忆池',description:()=> '浏览完整正文并注入当前对话'}]}))
     ctx.effect(()=>ctx.slots.inject('sidebar.right.pane.tab',()=>ctx.slots.register({name:'sidebar.right.pane.tab',key:KIND},Panel)))

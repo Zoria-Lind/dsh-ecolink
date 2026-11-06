@@ -9,3 +9,6 @@ extension.crx
 .publish-adapter/
 .publish-service/
 *.tgz
+
+# 发布 staging 清单误拷到根目录时不要进提交
+/package.json

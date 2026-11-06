@@ -119,3 +119,11 @@ test('actual host service guard: status, durable manual injection, and pre-step 
  assert.ok(a.session.log.some(ev=>ev.type==='plugin:ecolink/state'&&ev.data.kind==='queue'))
  const admitted=refs(await step(a));assert.equal(admitted.length,1);assert.match(admitted[0].content[0].text,/现有对话所需完整正文/);assert.equal(panel.status(a.session).items[0].status,'admitted');panel()
 })
+
+test('a fresh memory pool lists no entries and other read errors remain visible', () => {
+ const fromError=code=>createMemoryReader({poolPath:'synthetic'},{readFile(){throw Object.assign(new Error(code),{code})}})
+ const missing=fromError('ENOENT')
+ assert.deepEqual(missing.list().items,[])
+ assert.equal(missing.list().total,0)
+ assert.throws(()=>fromError('EACCES').list(),{code:'EACCES'})
+})

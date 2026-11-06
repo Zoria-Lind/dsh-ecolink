@@ -1,4 +1,4 @@
-> **v0.3.0（2026-10-29）**：新增 `/memory/artifact` 完整成果存储（独立于短记忆，保留历史修订）、池条目的类型与时间排序、跨池分页读取。规则与限制见 [adapter/README.md](../adapter/README.md)。
+> **v1.0.0（2026-11-06）**：本版 service 无功能变化；1.0.0 的核心是把 adapter、扩展与桌面补丁的接口冻结。`/memory/artifact`（完整成果、历史修订）、池条目类型/时间排序、跨池分页读取沿用 0.3.0。规则与限制见 [adapter/README.md](../adapter/README.md)。
 
 # dsh-ecolink-service
 
