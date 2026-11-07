@@ -1,3 +1,5 @@
+> **v1.0.1（2026-11-07）**：桌面版补上「记忆池」与压缩闭环——在内置网页直接查看记忆、发起压缩并按提示完成验收；同时修复插件热重载时 `ecolink_memory` 工具重复注册导致整轮运行失败的问题。
+>
 > **v1.0.0（2026-11-06）**：Harness 和 DeepSeek 网页端不再孤立——同一个窗口一键切换，双端记忆按你的选择互通；网页里查到的、写下的，可以存成完整成果、带进 Harness 草稿，鼠标划一段也能入池。安全：不碰账号、不上云、不代理请求。核心接口自本版冻结：新增功能走 1.x，破坏性改动走 2.0.0。
 
 # dsh-ecolink
@@ -13,7 +15,7 @@
 ### 1. 装 DSH 适配层（必装，自带本地服务）
 
 ```bash
-dsh plugin --profile web add @zoria-lind/dsh-ecolink-adapter@1.0.0
+dsh plugin --profile web add @zoria-lind/dsh-ecolink-adapter@1.0.1
 ```
 
 - Web 版 DSH 用 `--profile web`；桌面客户端用 `--profile desktop`。

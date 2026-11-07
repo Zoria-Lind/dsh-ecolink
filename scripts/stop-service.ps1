@@ -1,7 +1,7 @@
 # 停掉 ecolink-service(无论谁拉起的:adapter 自动拉起 / 登录自启任务 / 手动 node)
 # 注意:adapter 会在下一轮 DSH 请求时自动补起(pre-step 节流 60s),想彻底停用请同时
 # 把 adapter 配置的 serviceAutoStart 设为 false 或卸载自启任务。
-# 用法:powershell -ExecutionPolicy Bypass -File D:\dsh\dsh-plugins\dsh-ecolink\scripts\stop-service.ps1
+# 用法:powershell -ExecutionPolicy Bypass -File <仓库目录>\scripts\stop-service.ps1
 
 $ErrorActionPreference = 'Stop'
 $serviceDir = Join-Path $PSScriptRoot '..\service'

@@ -14,6 +14,7 @@
 
 - **同窗 DeepSeek**：左上角透明切换键，在同一个窗口打开/返回 `chat.deepseek.com`；切回 Harness 时网页保持挂载，再打开还在原处。
 - **划选入池**：在用户消息或回答正文里划选，浮出“入记忆池”，保存为完整 artifact（不是短记忆）。
+- **记忆池与压缩**：在内置网页右下角打开「记忆池」，查看内容或开始压缩。按提示开启网页新对话并发送消息，等回答完成后回到记忆池点击「完成压缩」。桌面包直接使用扩展的压缩按钮、提示和验收代码。
 - **缩放**：鼠标在网页上 Ctrl+滚轮缩放；页面聚焦时 Ctrl+`+` / `-` / `0` 放大、缩小、重置。
 - **带入草稿**：DSH 侧栏记忆池里的“带入草稿”，把已加载完整的正文插进当前对话输入框，由你决定发不发。
 
@@ -25,6 +26,7 @@
 | `patch-host.mjs` | 对主进程/preload 做定点替换；锚点不唯一或漂移就报错，不猜 |
 | `memory-bridge.mjs` | 读取 `resources/ecolink-desktop.json` 或环境变量，建立到本地 service 的受控桥 |
 | `build-guest.mjs` | 把扩展的 `inject.js` / `content.js` / `artifact.js` 与 `selection.cjs`、`zoom.cjs` 组装成 `ecolink-guest.cjs` |
+| `build-compression.mjs` | 构建时复用扩展的记忆面板、压缩界面和后台流程 |
 | `selection.cjs` | 页内划选按钮 |
 | `zoom.cjs` | 内嵌页缩放 |
 | `fixture/` | Electron/Edge 夹具，给改动补丁本身时用；日常使用不需要 |
@@ -39,7 +41,7 @@
 node --input-type=module -e "import { prepareHost } from './desktop/prepare-host.mjs'; await prepareHost(process.argv[1], process.argv[2])" "<安装目录>/resources/app.asar" "<输出目录>/app.asar"
 ```
 
-4. 检查输出包能启动、四个 JavaScript 入口语法正常（构建脚本内部会生成 `main` / `preload` / `guest`，也可自行导出复核）。
+4. 检查输出包能启动、四个 JavaScript 入口语法正常（构建脚本内部会生成 `main` / `preload` / `guest` / `compression`，也可自行导出复核）。
 
 ## 安装与回退
 
@@ -61,7 +63,7 @@ node --input-type=module -e "import { prepareHost } from './desktop/prepare-host
 ## 边界与隐私
 
 - 桥只连 `127.0.0.1`，带 `X-Ecolink-Token`；只接受租约所属 guest 的主框架、且 URL 必须是 `https://chat.deepseek.com` 的 IPC。
-- 内嵌网页只收割短标签和显式保存，**不接收共享池全文，也不显示记忆面板**（`contentInjectionEnabled: false`、`panelEnabled: false`）。
+- 记忆列表通过桌面桥加载到隔离面板。开启压缩后，原扩展流程会把符合条件的旧记忆带入网页新对话。压缩进度保存在 DSH 的本地用户数据目录。
 - 网页分区是持久的（`persist:dsh-ecolink-chat`），登录状态跨重启保留；账号凭据不迁移到其他应用。
 - 补丁会把构建当次的扩展脚本嵌进 `ecolink-guest.cjs`。**扩展改了就要重新打补丁**，否则内嵌页还是旧脚本。
 - DSH 更新、重装或修复安装都会覆盖 `app.asar`，补丁随之消失；升级后按本文件重建。

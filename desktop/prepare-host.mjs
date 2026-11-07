@@ -3,6 +3,7 @@ import { open, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { buildGuestPreload } from './build-guest.mjs'
 import { patchDesktopHost } from './patch-host.mjs'
+import { buildCompressionBackground } from './build-compression.mjs'
 
 export async function prepareHost(input, output) {
   if (resolve(input) === resolve(output)) throw new Error('Output must be separate from the installed app')
@@ -34,6 +35,7 @@ export async function prepareHost(input, output) {
     for (const [name, text] of [
       ['ecolink-guest.cjs', await buildGuestPreload(root)],
       ['ecolink-memory.mjs', await readFile(new URL('./memory-bridge.mjs', import.meta.url), 'utf8')],
+      ['ecolink-compression.mjs', await buildCompressionBackground(root)],
     ]) {
       if (lib[name]) throw new Error('Desktop package already contains ' + name)
       lib[name] = { size: 0, offset: '0' }

@@ -5,7 +5,7 @@ export function patchDesktopHost(main, preload) {
     return source.replace(before, () => after)
   }
   const change = (before, after) => { main = replace(main, before, after) }
-  main = 'import { loadMemoryBridge, isDeepSeekDocument, ECOLINK_CHANNEL } from "./ecolink-memory.mjs";\n' + main
+  main = 'import { loadMemoryBridge, isDeepSeekDocument, ECOLINK_CHANNEL } from "./ecolink-memory.mjs";\nimport * as compression from "./ecolink-compression.mjs";\n' + main
   change('acquire(owner, workspace) {', [
     'acquire(owner, workspace, ecolink = false) {',
     '    if (ecolink && [...this.leases.values()].some(lease => lease.owner === owner && lease.ecolink))',
@@ -35,7 +35,7 @@ export function patchDesktopHost(main, preload) {
   ].join('\n'))
   change('\tconst browserGuests = new DesktopBrowserGuests(() => hostUrl);', [
     '\tconst browserGuests = new DesktopBrowserGuests(() => hostUrl);',
-    '\tconst ecolinkBridge = loadMemoryBridge();',
+    '\tconst ecolinkBridge = loadMemoryBridge(undefined, process.env, { stateDir: app.getPath("userData"), compression });',
   ].join('\n'))
   change('\t\treturn browserGuests.acquire(event.sender, workspace);', [
     '\t\tif (workspace === null) {',

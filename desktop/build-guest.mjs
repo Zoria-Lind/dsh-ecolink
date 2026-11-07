@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { buildCompressionControls } from './build-compression.mjs'
 
 function replaceOnce(source, before, after) {
   if (!source.includes(before) || source.indexOf(before) !== source.lastIndexOf(before)) {
@@ -59,13 +60,24 @@ export async function buildGuestPreload(root) {
     "'use strict'",
     "const { contextBridge, ipcRenderer, webFrame } = require('electron')",
     "if (process.isMainFrame && location.origin === 'https://chat.deepseek.com') {",
-    "const chrome = { runtime: { sendMessage: message => ipcRenderer.invoke('dsh-desktop:ecolink-memory', message) } }",
+    'const listeners = []',
+    'const chrome = { storage: { onChanged: { addListener: listener => listeners.push(listener) } }, runtime: { async sendMessage(message) {',
+    "  const result = await ipcRenderer.invoke('dsh-desktop:ecolink-memory', message)",
+    "  if (result?.ok && (message.kind === 'compress-start' || message.kind === 'compress-finish')) {",
+    "    for (const listener of listeners) listener({ ecolink_compress: {} }, 'local')",
+    '  }',
+    "  if (result?.compressionChanged || (result?.ok && message.kind === 'dup-report')) {",
+    "    for (const listener of listeners) listener({ ecolink_progress: {} }, 'local')",
+    '  }',
+    '  return result',
+    '} } }',
     core.replace(/^export (?=function )/gm, ''),
     selection,
     zoom,
     'installEcolinkZoom(webFrame)',
     'contextBridge.executeInMainWorld({ func: function () {\n' + inject + '\n} })',
     content,
+    await buildCompressionControls(root),
     editor,
     '}',
   ].join('\n')

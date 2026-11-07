@@ -1,5 +1,7 @@
 # dsh-ecolink-adapter
 
+v1.0.1 修复插件热重载（如装新插件触发 config reload）时旧实例的 `ecolink_memory` 工具尚未注销、`register` 抛 “already registered” 导致整轮运行失败的问题；桌面宿主补丁新增记忆池与压缩闭环（仍属实验性本地补丁，不属于 npm 契约）。
+
 v1.0.0 起提供指定全文读取、记忆侧栏与通用/非通用分类、网页完整成果保存，并配套可选的桌面宿主补丁（同窗 DeepSeek 网页、划选入池、缩放、带入草稿）。核心接口自 1.0.0 起冻结：新增功能走 1.x，破坏性改动走 2.0.0；桌面宿主补丁是实验性本地补丁，不属于 npm 契约。仅在 DSH `0.2.2-rc.1` 实测，`engines.dsh` 与 `dsh.compatibility` 都只声明该版本。发布包需由仓库根目录的 `scripts/build-npm-pkgs.mjs` 生成镜像布局，不能直接把 adapter 子目录当作完整包。
 
 ## 安装与包关系

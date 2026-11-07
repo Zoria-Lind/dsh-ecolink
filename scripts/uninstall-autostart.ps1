@@ -1,5 +1,5 @@
 # 卸载 dsh-ecolink 登录自启任务(不杀当前正在运行的服务,只管计划任务)
-# 用法:powershell -ExecutionPolicy Bypass -File D:\dsh\dsh-plugins\dsh-ecolink\scripts\uninstall-autostart.ps1
+# 用法:powershell -ExecutionPolicy Bypass -File <仓库目录>\scripts\uninstall-autostart.ps1
 
 $ErrorActionPreference = 'Continue'
 $taskName = 'dsh-ecolink-service'

@@ -1,7 +1,7 @@
 ﻿# 安装 dsh-ecolink 服务登录自启(隐藏窗口,无 UAC 弹窗)
 # 用途:adapter 自动拉起之外的第二保险——不开 DSH、只在网页端用 ecolink 时服务也在。
 # 用法:右键"使用 PowerShell 运行",或:
-#   powershell -ExecutionPolicy Bypass -File D:\dsh\dsh-plugins\dsh-ecolink\scripts\install-autostart.ps1
+#   powershell -ExecutionPolicy Bypass -File <仓库目录>\scripts\install-autostart.ps1
 # 可加 -ServerPath <server.mjs 路径> 强制指定要跑哪一份。
 # 卸载:uninstall-autostart.ps1
 #

@@ -18,7 +18,11 @@ export function createMemoryAccessModule(ctx,config,stats,deps={}) {
       parameters:{action:{type:'string',enum:['list','read']},pool:{type:'string'},ref:{type:'string'},id:{type:'string'},key:{type:'string'},query:{type:'string'},version:{type:'string'},revision:{type:'string'},offset:{type:'integer'},limit:{type:'integer'}},
       output:{schema:{type:'string'},render:(_a,v)=>[{type:'text',text:v}]},isConcurrencySafe:()=>true,
       execute:async args=>{try{return JSON.stringify(query(args))}catch(e){return JSON.stringify({kind:'error',error:e.message})}}})
-    mounted.set(agent,agent.ctx.tools.register(tool))
+    // 2026-11-07:插件热重载(如装新插件触发 config reload)时旧实例的同名工具可能尚未注销,
+    // register 会抛 "already registered in this scope",而 mount 在 agent/pre-step 里跑 → 整轮运行失败。
+    // 这里吞掉该错误、不记入 mounted,下一步再试;旧实例注销后由本实例接管。
+    try { mounted.set(agent,agent.ctx.tools.register(tool)) }
+    catch (e) { if (!/already registered/i.test(String(e?.message))) throw e }
   }
   const created=p=>mount(p.agent), disposed=p=>{mounted.get(p.agent)?.();mounted.delete(p.agent)}
   const preStep=(p,next)=>{mount(p.agent);return next()}
