@@ -28,12 +28,31 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
       outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
       outline-offset: 2px;
     }
-    .ecolink-switch {
+    .ecolink-titlebar {
       position: fixed;
-      inset: 6px auto auto 152px;
+      top: calc((var(--dsh-windows-titlebar-height, 40px) - 28px) / 2);
+      left: 152px;
       z-index: 1800;
+      display: flex;
+      align-items: center;
+      gap: 4px;
       -webkit-app-region: no-drag;
       app-region: no-drag;
+    }
+    [data-windows-titlebar] .ecolink-titlebar {
+      left: calc(var(--dsh-windows-menu-start, 48px) + var(--ecolink-windows-menu-width, 98px) + 6px);
+    }
+    .ecolink-shadow-actions { display: flex; gap: 4px; }
+    .ecolink-shadow-notice {
+      position: absolute;
+      top: calc(100% + 7px);
+      left: 0;
+      white-space: nowrap;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: var(--dsw-alias-bg-layer-2, Canvas);
+      pointer-events: none;
     }
     .ecolink-web-surface {
       position: fixed;
@@ -50,6 +69,14 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
     const response=await fetch(method==='GET'?`${path}?${new URLSearchParams(args)}`:path,
       {method,signal,headers:method==='POST'?{'Content-Type':'application/json'}:{},...(method==='POST'?{body:JSON.stringify(args)}:{})})
     const value=await response.json();if(!response.ok||value.error)throw new Error(value.error??'记忆请求失败');return value
+  }
+  async function shadowApi(args) {
+    const response=await fetch('api/ecolink-shadow',{
+      method:'POST',headers:{'Content-Type':'application/json','X-Ecolink-Shadow':'1'},body:JSON.stringify(args),
+    })
+    const value=await response.json()
+    if(!response.ok)throw new Error(value.error??'影子会话请求失败')
+    return value
   }
   function timeLabel(value) {
     const date=new Date(value)
@@ -151,11 +178,82 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
       state&&h('div',null,state.notice,state.omitted>0&&h('p',null,`开局超预算未注入 ${state.omitted} 条`),
         ...state.items.map(i=>h('div',{key:i.token},`${i.status==='admitted'?'已进入上下文':'待注入'}${i.partial?'（部分正文）':''} · ${i.ref}`))))
   }
-  function DeepSeekSwitch() {
+  let boundSessions=new Map()
+  const badgeListeners=new Set()
+  const subscribeBadges=listener=>{
+    badgeListeners.add(listener)
+    return ()=>badgeListeners.delete(listener)
+  }
+  const badgeSnapshot=()=>boundSessions
+  function publishBadges(bindings) {
+    const next=new Map(bindings.map(({sessionId,webId})=>[sessionId,webId]))
+    if(next.size===boundSessions.size&&[...next].every(([id,webId])=>boundSessions.get(id)===webId))return
+    boundSessions=next
+    for(const listener of badgeListeners)listener()
+  }
+  function ShadowBadge({sessionId}) {
+    const ids=React.useSyncExternalStore(subscribeBadges,badgeSnapshot)
+    return ids.has(sessionId)&&h('span',{title:'影子会话','aria-label':'影子会话',style:{opacity:.75,flexShrink:0}},'⇄')
+  }
+  const webRoot='https://chat.deepseek.com'
+  function guestPage(guest) {
+    try {
+      const url=new URL(guest.getURL())
+      if(url.origin!==webRoot)return null
+      return url
+    } catch { return null }
+  }
+  const pageWebId=url=>/^\/(?:a\/chat\/s|chat)\/([a-zA-Z0-9_-]{8,128})\/?$/.exec(url?.pathname)?.[1]
+  function DeepSeekSwitch({workspace}) {
     const bridge=window.dshDesktop?.browser
     const [shown,setShown]=React.useState(false),[started,setStarted]=React.useState(false)
     const [error,setError]=React.useState('')
-    const host=React.useRef(null)
+    const [syncing,setSyncing]=React.useState(false),[shadowMessage,setShadowMessage]=React.useState(null)
+    const host=React.useRef(null),controls=React.useRef(null),refreshJob=React.useRef(null)
+    const bindingMap=React.useSyncExternalStore(subscribeBadges,badgeSnapshot)
+    const selection=workspace.selection
+    const subscribe=React.useCallback(listener=>selection.subscribe(listener),[selection])
+    const selected=React.useCallback(()=>selection.getSnapshot().sessionId,[selection])
+    const sessionId=React.useSyncExternalStore(subscribe,selected)
+    const webId=bindingMap.get(sessionId)
+    function finishJob(job,text) {
+      if(refreshJob.current!==job)return
+      clearTimeout(job.timeout)
+      refreshJob.current=null
+      setSyncing(false)
+      setShadowMessage({sessionId:job.sessionId,text})
+    }
+    function requestRefresh(id,target) {
+      if(refreshJob.current)return
+      const job={sessionId:id,webId:target,requestId:crypto.randomUUID()}
+      job.timeout=setTimeout(()=>finishJob(job,'刷新同步超时，请重试'),75000)
+      refreshJob.current=job
+      setShadowMessage(null)
+      setSyncing(true)
+      setStarted(true)
+      controls.current?.openTarget()
+    }
+    React.useEffect(()=>{
+      function keydown(event) {
+        if(!event.isTrusted||!event.ctrlKey||event.shiftKey||event.altKey||event.metaKey||event.key.toLowerCase()!=='r')return
+        const id=selected(),target=boundSessions.get(id)
+        if(!shown&&!target)return
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        if(event.repeat)return
+        if(shown)controls.current?.reload()
+        else requestRefresh(id,target)
+      }
+      window.addEventListener('keydown',keydown,true)
+      return ()=>window.removeEventListener('keydown',keydown,true)
+    },[shown,selected])
+    React.useEffect(()=>()=>{
+      clearTimeout(refreshJob.current?.timeout)
+      refreshJob.current=null
+    },[])
+    React.useEffect(()=>{
+      if(bridge?.acquireEcolink)shadowApi({action:'bindings'}).then(({bindings})=>publishBadges(bindings),()=>{})
+    },[bridge])
     React.useEffect(()=>{
       if(!started||!bridge?.acquireEcolink)return
       let disposed=false,lease,guest
@@ -172,32 +270,126 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
         guest.setAttribute('partition',reservation.partition)
         guest.setAttribute('src','about:blank#'+lease)
         guest.addEventListener('dom-ready',()=>{
-          if(!disposed)guest.loadURL('https://chat.deepseek.com/').catch(failure)
+          if(disposed)return
+          attached=true
+          if(refreshJob.current)openTarget()
+          else guest.loadURL(webRoot+'/').catch(failure)
         },{once:true})
         guest.addEventListener('did-fail-load',event=>{
-          if(event.isMainFrame&&event.errorCode!==-3)failure()
+          if(event.isMainFrame&&event.errorCode!==-3){
+            failure()
+            if(refreshJob.current)finishJob(refreshJob.current,'绑定的网页加载失败，请重试')
+          }
         })
         guest.addEventListener('did-finish-load',()=>{
-          if(!disposed)setError('')
+          if(!disposed){loaded=true;setError('')}
         })
+        let pending=null,currentWebId=null,loaded=false,attached=false,reloadJob=null
+        function reload() {
+          const url=guestPage(guest)
+          if(!url)return
+          const target=pageWebId(url)
+          if(refreshJob.current)finishJob(refreshJob.current,'网页正在刷新，可在加载后重试同步')
+          reloadJob=target?{webId:target,requestId:crypto.randomUUID()}:null
+          loaded=false
+          guest.reload()
+        }
+        function openTarget() {
+          const job=refreshJob.current
+          if(!job||!attached)return
+          if(job.webId===pageWebId(guestPage(guest)))return
+          reloadJob=null
+          loaded=false
+          guest.loadURL(webRoot+'/a/chat/s/'+encodeURIComponent(job.webId)).catch(()=>{
+            if(!disposed)finishJob(job,'无法打开绑定的网页，请检查登录后重试')
+          })
+        }
+        guest.addEventListener('ipc-message',async event=>{
+          if(event.channel==='ecolink-shadow-sync-done'){
+            const result=event.args[0],job=refreshJob.current
+            if(job?.requestId===result.requestId)finishJob(job,result.error??result.warning??(result.imported?
+              '已同步 '+result.imported+' 轮网页问答':'已刷新同步，网页没有新增问答'))
+            return
+          }
+          if(event.channel==='ecolink-shadow-reload'){reload();return}
+          if(event.channel!=='ecolink-shadow')return
+          const {id,action,...args}=event.args[0]
+          let result
+          try {
+            if(action==='set-pending'){
+              pending=args.workspaceId
+              result={}
+            }else if(action==='inspect'){
+              if(args.webId!==pageWebId(guestPage(guest)))throw new Error('网页已切换，请重试')
+              currentWebId=args.webId
+              const [state,{bindings}]=await Promise.all([
+                args.webId?shadowApi({action:'status',...args}):null,
+                shadowApi({action:'bindings'})
+              ])
+              if(!disposed)publishBadges(bindings)
+              result={pending,state,webIds:bindings.map(({webId})=>webId)}
+              const job=refreshJob.current??reloadJob
+              if(!disposed&&loaded&&job&&job.webId===args.webId&&currentWebId===args.webId&&args.webId===pageWebId(guestPage(guest))&&!job.sent){
+                if(job.sessionId&&selected()!==job.sessionId)finishJob(job,'Harness 已切换会话，请重新刷新同步')
+                else if(state?.binding?.ready&&(!job.sessionId||state.binding.sessionId===job.sessionId)){
+                  job.sent=true
+                  if(job===reloadJob)reloadJob=null
+                  guest.send('ecolink-shadow-sync',{webId:job.webId,requestId:job.requestId})
+                }else if(job===reloadJob)reloadJob=null
+                else finishJob(job,'找不到绑定的影子会话')
+              }
+            }else if(action==='open'&&args.webId&&args.webId===currentWebId){
+              const {binding}=await shadowApi({action:'status',webId:args.webId})
+              if(!binding?.ready||currentWebId!==args.webId)throw new Error('请先打开并绑定目标网页会话')
+              await workspace.openSession(binding.sessionId)
+              setShown(false)
+              result={}
+            }else if(action==='projects'||args.webId&&args.webId===currentWebId&&args.webId===pageWebId(guestPage(guest))&&['bind','sync','handoff','returns','ack'].includes(action)){
+              result=await shadowApi({action,...args})
+            }else throw new Error('请先打开并绑定目标网页会话')
+          }catch(error){result={error:error.message}}
+          if(!disposed)guest.send('ecolink-shadow-result',{id,result})
+        })
+        guest.addEventListener('did-start-navigation',event=>{
+          if(!event.isMainFrame)return
+          if(!event.isInPlace)loaded=false
+          currentWebId=null
+          let destination
+          try { destination=pageWebId(new URL(event.url)) } catch {}
+          if(reloadJob&&reloadJob.webId!==destination)reloadJob=null
+          const job=refreshJob.current
+          if(job&&job.webId!==destination&&event.url!=='about:blank#'+lease)
+            finishJob(job,'网页已切换，请重新刷新同步')
+        })
+        controls.current={openTarget,reload}
         target.append(guest)
       }
-      mount().catch(failure)
+      mount().catch(()=>{
+        failure()
+        if(!disposed&&refreshJob.current)finishJob(refreshJob.current,'无法打开内嵌网页，请重试')
+      })
       return ()=>{
         disposed=true
+        controls.current=null
         guest?.remove()
         if(lease)bridge.release(lease).catch(()=>{})
       }
-    },[started,bridge])
+    },[started,bridge,workspace,selected])
     if(!bridge?.acquireEcolink)return null
     const toggle=()=>{
       if(!started)setStarted(true)
       setShown(!shown)
     }
     return h(React.Fragment,null,
-      h('button',{type:'button',className:'ecolink-header-button ecolink-switch','aria-pressed':shown,
-        title:shown?'返回当前 Harness 对话':'在当前窗口打开 DeepSeek 网页',onClick:toggle},
-        shown?'返回 Harness':'DeepSeek 网页'),
+      h('div',{className:'ecolink-titlebar'},
+        h('button',{type:'button',className:'ecolink-header-button ecolink-switch','aria-pressed':shown,
+          title:shown?'返回当前 Harness 对话':'在当前窗口打开 DeepSeek 网页',onClick:toggle},
+          shown?'返回 Harness':'DeepSeek 网页'),
+        !shown&&webId&&h('div',{className:'ecolink-shadow-actions'},
+          h('button',{type:'button',className:'ecolink-header-button',title:'刷新当前影子会话（Ctrl+R）',
+            disabled:syncing,onClick:()=>requestRefresh(sessionId,webId)},syncing?'正在刷新同步':'刷新同步')),
+        !shown&&shadowMessage?.sessionId===sessionId&&shadowMessage?.text&&
+          h('span',{className:'ecolink-shadow-notice',role:'status'},shadowMessage.text)),
       started&&h('section',{className:'ecolink-web-surface',hidden:!shown,'aria-label':'内嵌 DeepSeek 网页'},
         h('div',{ref:host,className:'ecolink-web-guest'}),
         error&&h('p',{className:'ecolink-web-error',role:'alert'},error)))
@@ -210,11 +402,36 @@ window.__ModuleLoader__.load({id:'@zoria-lind/dsh-ecolink-adapter',factory:requi
       const style=document.createElement('style')
       style.textContent=HEADER_BUTTON_CSS
       document.head.appendChild(style)
-      return ()=>style.remove()
+      const root=document.documentElement, property='--ecolink-windows-menu-width'
+      let menu, resize
+      const watchMenu=()=>{
+        menu=document.querySelector('[data-windows-menu]')
+        if(!menu)return
+        mounted.disconnect()
+        const updateWidth=()=>root.style.setProperty(property,menu.getBoundingClientRect().width+'px')
+        resize=new ResizeObserver(updateWidth)
+        updateWidth()
+        resize.observe(menu,{box:'border-box'})
+      }
+      const mounted=new MutationObserver(watchMenu)
+      if(root.hasAttribute('data-windows-titlebar')){
+        watchMenu()
+        if(!menu)mounted.observe(document.body,{childList:true})
+      }
+      return ()=>{
+        mounted.disconnect()
+        resize?.disconnect()
+        root.style.removeProperty(property)
+        style.remove()
+      }
     })
-    if(window.dshDesktop?.browser?.acquireEcolink)ctx.effect(()=>ctx.slots.inject('shell.overlay',()=>ctx.slots.register({
-      name:'shell.overlay',id:'ecolink-deepseek-switch'
-    },DeepSeekSwitch)))
+    if(window.dshDesktop?.browser?.acquireEcolink)ctx.inject(['uiWorkspace'],c=>c.effect(()=>c.slots.inject('shell.overlay',()=>c.slots.register({
+      name:'shell.overlay',id:'ecolink-deepseek-switch',
+      inject:()=>({workspace:c.uiWorkspace})
+    },DeepSeekSwitch))))
+    if(window.dshDesktop?.browser?.acquireEcolink)ctx.effect(()=>ctx.slots.inject('sidebar.session.row.trailing',()=>ctx.slots.register({
+      name:'sidebar.session.row.trailing',id:'ecolink-shadow-badge'
+    },ShadowBadge)))
     ctx.effect(()=>ctx.sidebarRightTabs.register({id:KIND,kind:KIND,title:()=> '记忆池',
       guide:[{id:'ecolink',order:50,title:()=> '记忆池',description:()=> '浏览完整正文并注入当前对话'}]}))
     ctx.effect(()=>ctx.slots.inject('sidebar.right.pane.tab',()=>ctx.slots.register({name:'sidebar.right.pane.tab',key:KIND},Panel)))

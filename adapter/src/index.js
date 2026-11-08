@@ -7,6 +7,7 @@ import { createMemoryWriteModule } from './modules/memoryWrite.js'
 import { createServiceGuardModule } from './modules/serviceGuard.js'
 import { createMemoryPanelModule } from './modules/memoryPanel.js'
 import { createMemoryAccessModule } from './modules/memoryAccess.js'
+import { createShadowSessionModule } from './modules/shadowSession.js'
 import { createMemoryDiffModule } from './modules/memoryDiff.js'
 
 // E2 记忆 skill 正文:指引模型按需 read 记忆池(内容不再自动注入,这里是读取入口)。
@@ -25,6 +26,7 @@ export function apply(ctx, config = {}) {
   modules.push(createMemoryDiffModule(ctx, resolved.adapter, stats))
   modules.push(createMemoryAccessModule(ctx, resolved.adapter, stats))
   modules.push(createMemoryPanelModule(ctx, resolved.adapter, stats))
+  if (resolved.adapter.enabled) modules.push(createShadowSessionModule(ctx))
   // v1.1:service 未运行时自动拉起(先探测后 spawn,已在跑就不会重复起)
   modules.push(createServiceGuardModule(ctx, resolved.adapter, stats))
 
@@ -47,7 +49,7 @@ export function apply(ctx, config = {}) {
   })
 
   return () => {
-    for (const cleanup of modules) cleanup()
+    for (const cleanup of modules) cleanup?.()
     for (const dispose of skillDisposers) {
       try { dispose?.() } catch { /* noop */ }
     }

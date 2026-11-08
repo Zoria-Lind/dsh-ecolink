@@ -10,14 +10,21 @@ function replaceOnce(source, before, after) {
 
 export async function buildGuestPreload(root) {
   const read = name => readFile(new URL(name, root), 'utf8')
-  const [inject, content, artifact, core, selection, zoom] = await Promise.all([
+  const [inject, content, artifact, core, selection, zoom, shadow, marked, markedLicense, markdown] = await Promise.all([
     read('extension/inject.js'),
     read('extension/content.js'),
     read('extension/artifact.js'),
     read('extension/core/artifact.mjs'),
     read('desktop/selection.cjs'),
     read('desktop/zoom.cjs'),
+    read('desktop/shadow.cjs'),
+    read('desktop/vendor/marked.umd.js'),
+    read('desktop/vendor/marked-LICENSE.md'),
+    read('desktop/shadow-markdown.cjs'),
   ])
+  const shadowInputCleanup = inject.split('\n').filter(line =>
+    /^  (?:const (?:SCOPE_PREFIX|SCOPE_SUFFIX|INSTRUCTION_PREFIX|INSTRUCTION_SUFFIX|BLOCK_RE|INSTRUCTION_BLOCK_RE) = |function stripInjectedBlock\()/.test(line),
+  ).join('\n')
   let editor = replaceOnce(
     artifact,
     "  const {artifactPayload,decodeArtifactStream,decodeArtifactHistory,matchArtifactSource,pageArtifactMarkdown}=await import(chrome.runtime.getURL('core/artifact.mjs'))",
@@ -45,14 +52,15 @@ export async function buildGuestPreload(root) {
     '    let pending=null',
   ].join('\n'))
   editor = replaceOnce(editor, '  function scan(){', [
+    '  const userSelector=\'[data-message-role="user"], .ds-user-message, .ds-message > .fbb737a4\'',
     '  installEcolinkSelection((start,end)=>{',
     '    const element=node=>node.nodeType===1?node:node.parentElement',
-    '    const userSelector=\'[data-message-role="user"], .ds-user-message\'',
     '    const user=element(start)?.closest(userSelector)',
     '    if(user)return user===element(end)?.closest(userSelector)?user:null',
     '    const answer=element(start)?.closest(markdownSelector)',
     '    return answer&&answer===element(end)?.closest(markdownSelector)&&!reasoning(answer)?answer:null',
     '  },chrome.runtime.sendMessage)',
+    '  installEcolinkShadow({userSelector, markdownSelector, reasoning, pageArtifactMarkdown})',
     '  function scan(){',
   ].join('\n'))
 
@@ -73,6 +81,13 @@ export async function buildGuestPreload(root) {
     '} } }',
     core.replace(/^export (?=function )/gm, ''),
     selection,
+    shadowInputCleanup,
+    '/*\n' + markedLicense + '\n*/',
+    'const { Marked } = (() => { const exports = {}; const module = { exports };',
+    marked,
+    'return module.exports })()',
+    markdown,
+    shadow,
     zoom,
     'installEcolinkZoom(webFrame)',
     'contextBridge.executeInMainWorld({ func: function () {\n' + inject + '\n} })',

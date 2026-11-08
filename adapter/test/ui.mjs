@@ -16,10 +16,12 @@ function desktop({inputActions,desktopBridge}={}){const registrations=new Map(),
  useEffect(fn,deps){const i=cursor++;if(!effects[i]||deps.some((v,n)=>v!==effects[i].deps[n])){pending.push(()=>{effects[i]?.dispose?.();effects[i]={deps,dispose:fn()}})}}}
  const fetch=(url,options={})=>new Promise(resolve=>{requests.push({args:options.method==='POST'?JSON.parse(options.body):Object.fromEntries(new URL('http://synthetic/'+url).searchParams),options,resolve:v=>resolve({ok:true,json:async()=>v})})})
  const styles=[]
- const document={createElement:()=>({remove(){styles.splice(styles.indexOf(this),1)}}),head:{appendChild:style=>styles.push(style)}}
+ const document={createElement:()=>({remove(){styles.splice(styles.indexOf(this),1)}}),head:{appendChild:style=>styles.push(style)},
+  documentElement:{hasAttribute:()=>false,style:{setProperty(){},removeProperty(){}}},querySelector:()=>null,body:{}}
+ class SilentObserver{observe(){}disconnect(){}unobserve(){}}
  const disposers=[]
- const ctx={effect:fn=>disposers.push(fn()),sidebarRight:{openTab:kind=>opened.push(kind)},sidebarRightTabs:{register:d=>{definition=d;return()=>{}}},slots:{inject:(_n,fn)=>fn(),register:(d,component)=>{registrations.set(d.name,{definition:d,component});if(d.name==='sidebar.right.pane.tab')Panel=component;return()=>{}}}}
- vm.runInNewContext(readFileSync(new URL('../src/client.js',import.meta.url),'utf8'),{window:{dshDesktop:desktopBridge,__ModuleLoader__:{load:d=>{assert.equal(d.id,'@zoria-lind/dsh-ecolink-adapter');plugin=d.factory(n=>{assert.equal(n,'react');return React})}}},document,fetch,URLSearchParams,AbortController,setInterval:()=>1,clearInterval:()=>{}})
+ const ctx={inject:(_deps,apply)=>apply(ctx),effect:fn=>disposers.push(fn()),sidebarRight:{openTab:kind=>opened.push(kind)},sidebarRightTabs:{register:d=>{definition=d;return()=>{}}},slots:{inject:(_n,fn)=>fn(),register:(d,component)=>{registrations.set(d.name,{definition:d,component});if(d.name==='sidebar.right.pane.tab')Panel=component;return()=>{}}}}
+ vm.runInNewContext(readFileSync(new URL('../src/client.js',import.meta.url),'utf8'),{window:{dshDesktop:desktopBridge,__ModuleLoader__:{load:d=>{assert.equal(d.id,'@zoria-lind/dsh-ecolink-adapter');plugin=d.factory(n=>{assert.equal(n,'react');return React})}}},document,fetch,URLSearchParams,AbortController,setInterval:()=>1,clearInterval:()=>{},MutationObserver:SilentObserver,ResizeObserver:SilentObserver})
  plugin.apply(ctx)
  const render=(sessionId=props.sessionId)=>{props={sessionId,inputActions};cursor=0;tree=Panel(props);const work=pending;pending=[];work.forEach(fn=>fn());return tree}
  const nodes=(value=tree)=>typeof value==='object'&&value?[value,...(value.children??[]).flatMap(v=>nodes(v))]:[]

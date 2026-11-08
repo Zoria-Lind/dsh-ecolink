@@ -1,8 +1,8 @@
 # 桌面宿主补丁（实验性）
 
-把 DSH 桌面端变成“同一个窗口里既有 Harness、也有 DeepSeek 网页”的形态，并补上页内划选入池、缩放和“带入草稿”。
+把 DSH 桌面端变成“同一个窗口里既有 Harness、也有 DeepSeek 网页”的形态，并补上影子会话、页内划选入池、缩放和“带入草稿”。
 
-**这不是 npm 功能，也不在 dsh-ecolink 1.0.0 的稳定契约里。** 它直接改桌面安装的 `resources/app.asar`，需要管理员权限；DSH 一升级就失效，必须按当前版本重建。先备份、再动手。
+**这不是 npm 功能，也不在 dsh-ecolink 1.x 的稳定契约里。** 它直接改桌面安装的 `resources/app.asar`，需要管理员权限；DSH 一升级就失效，必须按当前版本重建。先备份、再动手。
 
 ## 适用基线
 
@@ -13,6 +13,7 @@
 ## 它能做什么
 
 - **同窗 DeepSeek**：左上角透明切换键，在同一个窗口打开/返回 `chat.deepseek.com`；切回 Harness 时网页保持挂载，再打开还在原处。
+- **影子会话（v1.1.0）**：在网页右上角把当前对话绑定到一个 DSH 项目会话；「同步到 Harness」把已完成的网页问答写进绑定会话，「交办给 DSH」直接派任务，Harness 的回答按 Markdown 回显在原网页对话里。Harness 侧行尾显示 ⇄ 标识，左上角「刷新同步」或 Ctrl+R 可补齐两端。
 - **划选入池**：在用户消息或回答正文里划选，浮出“入记忆池”，保存为完整 artifact（不是短记忆）。
 - **记忆池与压缩**：在内置网页右下角打开「记忆池」，查看内容或开始压缩。按提示开启网页新对话并发送消息，等回答完成后回到记忆池点击「完成压缩」。桌面包直接使用扩展的压缩按钮、提示和验收代码。
 - **缩放**：鼠标在网页上 Ctrl+滚轮缩放；页面聚焦时 Ctrl+`+` / `-` / `0` 放大、缩小、重置。
@@ -25,9 +26,12 @@
 | `prepare-host.mjs` | 从原始 `app.asar` 生成补丁包（主进程 + preload + guest preload + 记忆桥） |
 | `patch-host.mjs` | 对主进程/preload 做定点替换；锚点不唯一或漂移就报错，不猜 |
 | `memory-bridge.mjs` | 读取 `resources/ecolink-desktop.json` 或环境变量，建立到本地 service 的受控桥 |
-| `build-guest.mjs` | 把扩展的 `inject.js` / `content.js` / `artifact.js` 与 `selection.cjs`、`zoom.cjs` 组装成 `ecolink-guest.cjs` |
+| `build-guest.mjs` | 把扩展的 `inject.js` / `content.js` / `artifact.js` 与 `selection.cjs`、`shadow.cjs`、`zoom.cjs` 组装成 `ecolink-guest.cjs` |
 | `build-compression.mjs` | 构建时复用扩展的记忆面板、压缩界面和后台流程 |
 | `selection.cjs` | 页内划选按钮 |
+| `shadow.cjs` | 网页侧影子会话面板、同步清单与回显 |
+| `shadow-markdown.cjs` | 回显 Markdown 渲染（链接/图片只渲染为可点文本，不加载远程资源） |
+| `vendor/marked.umd.js` | 打包进 guest preload 的 Marked（MIT，许可证见同目录） |
 | `zoom.cjs` | 内嵌页缩放 |
 | `fixture/` | Electron/Edge 夹具，给改动补丁本身时用；日常使用不需要 |
 
