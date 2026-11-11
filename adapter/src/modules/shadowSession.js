@@ -150,9 +150,13 @@ export function createShadowActions(ctx, path, llm) {
           session.append('turn/start', { turn })
           agent.phase.lastTurn = turn
           try {
-            if (!previous[index]?.u) session.append('user/message', { ...user, id: id + '-u' }, appendOptions)
             session.append('step/start', { turn, step })
             try {
+              // The first surface message must reserve the system prompt position for native turns.
+              if (session.surface.nodes.length === 0) {
+                session.append('system/message', { turn, step, message: llm.createSystemMessage('') }, appendOptions)
+              }
+              if (!previous[index]?.u) session.append('user/message', { ...user, id: id + '-u' }, appendOptions)
               session.append('assistant/message', { turn, step, message: { ...assistant, id: id + '-a' }, stream }, appendOptions)
             } finally {
               session.append('step/end', { turn, step })
